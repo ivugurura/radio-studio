@@ -16,7 +16,7 @@ func main() {
 	manager.RegisterStudio("reformation-rw")
 	manager.RegisterStudio("reformantion-congo")
 
-	http.HandleFunc("/studios", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/studio/", func(w http.ResponseWriter, r *http.Request) {
 		manager.RouteStudioRequest(w, r)
 	})
 

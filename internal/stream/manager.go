@@ -18,8 +18,8 @@ func NewManager() *Manager {
 }
 
 func (m *Manager) RegisterStudio(studioID string) {
-	m.mu.Lock()
-	defer m.mu.Lock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	if _, exists := m.studios[studioID]; !exists {
 		m.studios[studioID] = NewStudio(studioID)
 	}
