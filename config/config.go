@@ -4,16 +4,22 @@ import "os"
 
 type Config struct {
 	ListenAddr string
+	AudioDir   string
 }
 
 func LoadConfig() *Config {
-	add := os.Getenv("LISTEN_ADDRESS")
+	addr := os.Getenv("LISTEN_ADDRESS")
+	if addr == "" {
+		addr = ":8000"
+	}
 
-	if add == "" {
-		add = ":8000"
+	audioDir := os.Getenv("AUDIO_DIR")
+	if audioDir == "" {
+		audioDir = "./audio"
 	}
 
 	return &Config{
-		ListenAddr: add,
+		ListenAddr: addr,
+		AudioDir:   audioDir,
 	}
 }

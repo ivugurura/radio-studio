@@ -19,6 +19,7 @@ type Studio struct {
 	listeners   map[chan []byte]struct{}
 
 	// TODO: Add playlist/AutoDJ support
+	autoDJ *AutoDJ
 }
 
 func NewStudio(id string) *Studio {
