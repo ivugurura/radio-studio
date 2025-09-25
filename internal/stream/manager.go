@@ -39,4 +39,20 @@ func (m *Manager) RouteStudioRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid studio endpoint", http.StatusBadRequest)
 		return
 	}
+
+	studioID, action := parts[0], parts[1]
+	studio, ok := m.GetStudio(studioID)
+	if !ok {
+		http.Error(w, "Studio not found", http.StatusNotFound)
+		return
+	}
+
+	switch action {
+	case "live":
+		studio.HandleLiveIngest(w, r)
+	case "listen":
+		studio.HandleListen(w, r)
+	default:
+		http.Error(w, "Unkown action", http.StatusNotFound)
+	}
 }
