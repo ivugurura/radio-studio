@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -34,6 +35,40 @@ func (a *AutoDJ) Play(ctx context.Context) {
 			if len(files) == 0 {
 				time.Sleep(5 * time.Second)
 				continue
+			}
+			for _, f := range files {
+				if f.IsDir() {
+					continue
+				}
+
+				path := filepath.Join(a.AudioDir, f.Name())
+				file, err := os.Open(path)
+				if err != nil {
+					log.Printf("AutoDJ: could not open file %s: %v", path, err)
+					continue
+				}
+				buf := make([]byte, 4096)
+				for {
+					n, err := file.Read(buf)
+					if n > 0 {
+						a.broadcast(buf[:n])
+					}
+					if err != nil {
+						break
+					}
+					select {
+					case <-ctx.Done():
+						file.Close()
+						return
+					default:
+					}
+				}
+				file.Close()
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
 			}
 		}
 	}

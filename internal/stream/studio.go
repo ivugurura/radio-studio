@@ -1,6 +1,7 @@
 package stream
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"sync"
@@ -8,7 +9,8 @@ import (
 
 // Studio represents a radio studio/channel
 type Studio struct {
-	ID string
+	ID       string
+	audioDir string
 
 	// liveIngest is the current live stream source, if any
 	liveMu     sync.RWMutex
@@ -19,13 +21,32 @@ type Studio struct {
 	listeners   map[chan []byte]struct{}
 
 	// TODO: Add playlist/AutoDJ support
-	autoDJ *AutoDJ
+	autoDJ    *AutoDJ
+	cancelADJ context.CancelFunc
 }
 
-func NewStudio(id string) *Studio {
-	return &Studio{
+func NewStudio(id string, dir string) *Studio {
+	studio := &Studio{
 		ID:        id,
+		audioDir:  dir,
 		listeners: make(map[chan []byte]struct{}),
+	}
+	studio.startAutoDJ()
+	return studio
+}
+
+func (s *Studio) startAutoDJ() {
+	ctx, cancel := context.WithCancel(context.Background())
+	s.cancelADJ = cancel
+	s.autoDJ = NewAutoDJ(s.audioDir, func(data []byte) {
+		s.broadcast(data)
+	})
+	go s.autoDJ.Play(ctx)
+}
+
+func (s *Studio) stopAutoDJ() {
+	if s.cancelADJ != nil {
+		s.cancelADJ()
 	}
 }
 
@@ -49,6 +70,7 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 		s.liveMu.Lock()
 		s.liveIngest = nil
 		s.liveMu.Unlock()
+		s.startAutoDJ()
 	}()
 
 	buf := make([]byte, 4096)

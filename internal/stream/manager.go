@@ -2,26 +2,30 @@ package stream
 
 import (
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 )
 
 type Manager struct {
-	studios map[string]*Studio
-	mu      sync.RWMutex
+	studios      map[string]*Studio
+	mu           sync.RWMutex
+	audioBaseDir string
 }
 
-func NewManager() *Manager {
+func NewManager(baseDir string) *Manager {
 	return &Manager{
-		studios: make(map[string]*Studio),
+		studios:      make(map[string]*Studio),
+		audioBaseDir: baseDir,
 	}
 }
 
 func (m *Manager) RegisterStudio(studioID string) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if _, exists := m.studios[studioID]; !exists {
-		m.studios[studioID] = NewStudio(studioID)
+		studioAudioDir := filepath.Join(m.audioBaseDir, studioID)
+		m.studios[studioID] = NewStudio(studioID, studioAudioDir)
 	}
 }
 
