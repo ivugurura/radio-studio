@@ -1,0 +1,35 @@
+# Binaries for the current project
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+
+# Go module cache
+/pkg/
+/bin/
+
+# Go build cache
+/go.mod
+/go.sum
+
+# Dependency directories (if not using Go modules)
+vendor/
+
+# Editor/IDE specific files
+.idea/
+.vscode/
+*.swp
+*.bak
+*.swo
+
+# Operating system generated files
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log
+
+# Test cache
+/test/
+.env
