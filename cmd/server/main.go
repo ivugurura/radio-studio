@@ -16,7 +16,7 @@ func main() {
 	manager := stream.NewManager(cfg.AudioDir)
 
 	manager.RegisterStudio("reformation-rw")
-	manager.RegisterStudio("reformantion-congo")
+	manager.RegisterStudio("reformation-congo")
 
 	http.HandleFunc("/studio/", func(w http.ResponseWriter, r *http.Request) {
 		manager.RouteStudioRequest(w, r)

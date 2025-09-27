@@ -8,7 +8,7 @@ type Config struct {
 }
 
 func LoadConfig() *Config {
-	addr := os.Getenv("LISTEN_ADDRESS")
+	addr := os.Getenv("LISTEN_ADDR")
 	if addr == "" {
 		addr = ":8000"
 	}
