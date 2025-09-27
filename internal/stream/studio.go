@@ -87,7 +87,14 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 
 // HandleListen streams audio (live or AutoDJ) to a listener.
 func (s *Studio) HandleListen(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "audio/mpeg") // or appropriate mime type
+	// Set all necessary headers
+	w.Header().Set("Content-Type", "audio/mpeg")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("Transfer-Encoding", "chunked")
+	w.WriteHeader(http.StatusOK)
+
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
