@@ -3,8 +3,10 @@ package stream
 import (
 	"context"
 	"io"
+	"log"
 	"net/http"
 	"sync"
+	"sync/atomic"
 )
 
 // Studio represents a radio studio/channel
@@ -23,6 +25,8 @@ type Studio struct {
 	// TODO: Add playlist/AutoDJ support
 	autoDJ    *AutoDJ
 	cancelADJ context.CancelFunc
+
+	droppedFrames atomic.Int64
 }
 
 func NewStudio(id string, dir string) *Studio {
@@ -77,7 +81,9 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 	for {
 		n, err := s.liveIngest.Read(buf)
 		if n > 0 {
-			s.broadcast(buf[:n])
+			chunk := make([]byte, n)
+			copy(chunk, buf[:n])
+			s.broadcast(chunk)
 		}
 		if err != nil {
 			break
@@ -87,12 +93,12 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 
 // HandleListen streams audio (live or AutoDJ) to a listener.
 func (s *Studio) HandleListen(w http.ResponseWriter, r *http.Request) {
-	// Set all necessary headers
 	w.Header().Set("Content-Type", "audio/mpeg")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("Accept-Ranges", "bytes")
-	w.Header().Set("Transfer-Encoding", "chunked")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	// Do NOT manually set Transfer-Encoding; Go will add chunked automatically.
 	w.WriteHeader(http.StatusOK)
 
 	flusher, ok := w.(http.Flusher)
@@ -101,20 +107,34 @@ func (s *Studio) HandleListen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ch := make(chan []byte, 256)
+	ch := make(chan []byte, 2048) // larger buffer reduces drops
 	s.listenersMu.Lock()
 	s.listeners[ch] = struct{}{}
+	curr := len(s.listeners)
 	s.listenersMu.Unlock()
+
+	log.Printf("Studio %s: new listener (total=%d)", s.ID, curr)
+
 	defer func() {
 		s.listenersMu.Lock()
 		delete(s.listeners, ch)
+		remaining := len(s.listeners)
 		s.listenersMu.Unlock()
 		close(ch)
+		log.Printf("Studio %s: listener disconnected (total=%d)", s.ID, remaining)
 	}()
 
-	// TODO: If not live, play AutoDJ (playlist)
+	// Optional “kickstart”; you can remove if you suspect issues.
+	// w.Write([]byte{0, 0, 0, 0})
+	// flusher.Flush()
+
 	for data := range ch {
-		_, _ = w.Write(data)
+		if len(data) == 0 {
+			continue
+		}
+		if _, err := w.Write(data); err != nil {
+			break
+		}
 		flusher.Flush()
 	}
 }
@@ -122,12 +142,15 @@ func (s *Studio) HandleListen(w http.ResponseWriter, r *http.Request) {
 func (s *Studio) broadcast(data []byte) {
 	s.listenersMu.RLock()
 	defer s.listenersMu.RUnlock()
-
 	for ch := range s.listeners {
-		// Non-blocking send to prevent slow listeners from blocking
 		select {
 		case ch <- data:
 		default:
+			s.droppedFrames.Add(1)
 		}
+	}
+	// Occasionally log
+	if v := s.droppedFrames.Load(); v > 0 && v%500 == 0 {
+		log.Printf("Studio %s: dropped frames=%d (consider increasing listener buffer or redesign)", s.ID, v)
 	}
 }
