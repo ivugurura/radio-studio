@@ -5,53 +5,98 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 )
 
+type ListenerState struct {
+	ch            chan []byte
+	droppedInARow int
+}
+
 // Studio represents a radio studio/channel
 type Studio struct {
-	ID       string
-	audioDir string
+	ID string
 
-	// liveIngest is the current live stream source, if any
+	// Live ingest (if present)
 	liveMu     sync.RWMutex
 	liveIngest io.ReadCloser
+	liveActive atomic.Bool
+
+	// Central feed: all upstream audio goes here (AutoDJ or live)
+	feed chan []byte
 
 	// listeners receives bytes (fan-out)
 	listenersMu sync.RWMutex
-	listeners   map[chan []byte]struct{}
-
-	// TODO: Add playlist/AutoDJ support
-	autoDJ    *AutoDJ
-	cancelADJ context.CancelFunc
+	listeners   map[*ListenerState]struct{}
 
 	droppedFrames atomic.Int64
 }
 
-func NewStudio(id string, dir string) *Studio {
-	studio := &Studio{
+func NewStudio(id string, dir string, audiodjFactory func(broadcast func([]byte)) *AutoDJ) *Studio {
+	s := &Studio{
 		ID:        id,
-		audioDir:  dir,
-		listeners: make(map[chan []byte]struct{}),
+		feed:      make(chan []byte, 8192),
+		listeners: make(map[*ListenerState]struct{}),
 	}
-	studio.startAutoDJ()
-	return studio
-}
 
-func (s *Studio) startAutoDJ() {
-	ctx, cancel := context.WithCancel(context.Background())
-	s.cancelADJ = cancel
-	s.autoDJ = NewAutoDJ(s.audioDir, func(data []byte) {
-		s.broadcast(data)
+	// Create AutoDJ with factory (lets you inject bitrate)
+	autodj := audiodjFactory(func(data []byte) {
+		if !s.liveActive.Load() {
+			s.pushToFeed(data)
+		}
 	})
-	go s.autoDJ.Play(ctx)
+
+	// Start distributor + AutoDJ
+	go s.distribute()
+	go autodj.Play(context.Background())
+	return s
 }
 
-func (s *Studio) stopAutoDJ() {
-	if s.cancelADJ != nil {
-		s.cancelADJ()
+func (s *Studio) pushToFeed(data []byte) {
+	// Non-blocking feed send; if full, drop (rare if sized well)
+	select {
+	case s.feed <- data:
+	default:
+		// could log; but dropping at feed level should be exceptional
 	}
+}
+
+func (s *Studio) removeListener(ls *ListenerState) {
+	s.listenersMu.Lock()
+	delete(s.listeners, ls)
+	s.listenersMu.Unlock()
+}
+
+func (s *Studio) distribute() {
+	log.Printf("Studio %s: distributer started", s.ID)
+	for data := range s.feed {
+		s.listenersMu.RLock()
+		for ls := range s.listeners {
+			select {
+			case ls.ch <- data:
+				ls.droppedInARow = 0
+			default:
+				ls.droppedInARow++
+				if ls.droppedInARow > 50 {
+					close(ls.ch)
+					s.listenersMu.RUnlock()
+					s.removeListener(ls)
+					s.listenersMu.RLock()
+					log.Printf("Studio %s: dropped slow listener", s.ID)
+				}
+			}
+		}
+		s.listenersMu.RUnlock()
+		if v := s.droppedFrames.Load(); v > 0 && v%500 == 0 {
+			log.Printf("Studio %s: dropped listener frames=%d (consider larger listener buffers)", s.ID, v)
+		}
+	}
+	log.Printf("Studio %s: distributor stopped", s.ID)
 }
 
 // HandleLiveIngest is called when a live encoder (e.g., BUTT) streams audio to the server.
@@ -68,27 +113,31 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.liveIngest = r.Body
+	s.liveActive.Store(true)
 	s.liveMu.Unlock()
 
-	defer func() {
-		s.liveMu.Lock()
-		s.liveIngest = nil
-		s.liveMu.Unlock()
-		s.startAutoDJ()
-	}()
+	log.Printf("Studio %s: live stream started", s.ID)
 
-	buf := make([]byte, 4096)
+	buf := make([]byte, 8192)
 	for {
 		n, err := s.liveIngest.Read(buf)
 		if n > 0 {
 			chunk := make([]byte, n)
 			copy(chunk, buf[:n])
-			s.broadcast(chunk)
+			s.pushToFeed(chunk)
 		}
 		if err != nil {
 			break
 		}
 	}
+	s.liveMu.Lock()
+	if s.liveIngest != nil {
+		_ = s.liveIngest.Close()
+		s.liveIngest = nil
+	}
+	s.liveActive.Store(false)
+	s.liveMu.Unlock()
+	log.Printf("Studio %s: live stream ended", s.ID)
 }
 
 // HandleListen streams audio (live or AutoDJ) to a listener.
@@ -107,28 +156,25 @@ func (s *Studio) HandleListen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ch := make(chan []byte, 2048) // larger buffer reduces drops
+	ls := &ListenerState{
+		ch: make(chan []byte, 512),
+	}
 	s.listenersMu.Lock()
-	s.listeners[ch] = struct{}{}
-	curr := len(s.listeners)
+	s.listeners[ls] = struct{}{}
+	total := len(s.listeners)
 	s.listenersMu.Unlock()
-
-	log.Printf("Studio %s: new listener (total=%d)", s.ID, curr)
+	log.Printf("Studio %s: new listener (total=%d)", s.ID, total)
 
 	defer func() {
-		s.listenersMu.Lock()
-		delete(s.listeners, ch)
-		remaining := len(s.listeners)
-		s.listenersMu.Unlock()
-		close(ch)
-		log.Printf("Studio %s: listener disconnected (total=%d)", s.ID, remaining)
+		s.removeListener(ls)
+		log.Printf("Studio %s: listener disconnected", s.ID)
 	}()
 
 	// Optional “kickstart”; you can remove if you suspect issues.
 	// w.Write([]byte{0, 0, 0, 0})
 	// flusher.Flush()
 
-	for data := range ch {
+	for data := range ls.ch {
 		if len(data) == 0 {
 			continue
 		}
@@ -139,18 +185,51 @@ func (s *Studio) HandleListen(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Studio) broadcast(data []byte) {
+// Example status endpoint (extend with richer JSON / metrics).
+func (s *Studio) handleStatus(w http.ResponseWriter, r *http.Request) {
+	// Simple plain text (replace with JSON if you add a JSON encoder)
 	s.listenersMu.RLock()
-	defer s.listenersMu.RUnlock()
-	for ch := range s.listeners {
-		select {
-		case ch <- data:
-		default:
-			s.droppedFrames.Add(1)
+	listenerCount := len(s.listeners)
+	s.listenersMu.RUnlock()
+
+	live := s.liveActive.Load()
+	w.Header().Set("Content-Type", "text/plain")
+	_, _ = w.Write([]byte(
+		strings.Join([]string{
+			"studio=" + s.ID,
+			"live=" + boolToString(live),
+			"listeners=" + intToString(listenerCount),
+			"", // newline at end
+		}, "\n"),
+	))
+}
+
+func SortedMP3Files(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasSuffix(strings.ToLower(name), ".mp3") {
+			out = append(out, name)
 		}
 	}
-	// Occasionally log
-	if v := s.droppedFrames.Load(); v > 0 && v%500 == 0 {
-		log.Printf("Studio %s: dropped frames=%d (consider increasing listener buffer or redesign)", s.ID, v)
+	sort.Strings(out)
+	return out, nil
+}
+
+func boolToString(b bool) string {
+	if b {
+		return "true"
 	}
+	return "false"
+}
+
+func intToString(i int) string {
+	return strconv.Itoa(i)
 }
