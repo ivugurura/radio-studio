@@ -1,4 +1,4 @@
-module github.com/ivugurura/ivugurura-radio
+module github.com/ivugurura/radio-studio
 
 go 1.25.1
 
