@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/ivugurura/ivugurura-radio/config"
-	"github.com/ivugurura/ivugurura-radio/internal/stream"
+	"github.com/ivugurura/radio-studio/config"
+	"github.com/ivugurura/radio-studio/internal/stream"
 	"github.com/joho/godotenv"
 )
 
