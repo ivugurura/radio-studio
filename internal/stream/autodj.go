@@ -5,7 +5,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 )
@@ -34,29 +33,36 @@ func (a *AutoDJ) Play(ctx context.Context) {
 		default:
 		}
 
-		entries, err := os.ReadDir(a.AudioDir)
+		files, err := os.ReadDir(a.AudioDir)
 		if err != nil {
 			log.Printf("AutoDJ: could not read dir %s: %v", a.AudioDir, err)
 			time.Sleep(5 * time.Second)
 			continue
 		}
-		var playlist []string
-		for _, e := range entries {
-			if e.IsDir() {
+		// var playlist []string
+		// for _, e := range entries {
+		// 	if e.IsDir() {
+		// 		continue
+		// 	}
+		// 	name := e.Name()
+		// 	if strings.HasSuffix(strings.ToLower(name), ".mp3") {
+		// 		playlist = append(playlist, name)
+		// 	}
+		// }
+		// if len(files) == 0 {
+		// 	time.Sleep(5 * time.Second)
+		// 	continue
+		// }
+		// sort.Strings(playlist) //deterministic order
+
+		for _, f := range files {
+			if f.IsDir() {
 				continue
 			}
-			name := e.Name()
-			if strings.HasSuffix(strings.ToLower(name), ".mp3") {
-				playlist = append(playlist, name)
+			name := f.Name()
+			if !strings.HasSuffix(strings.ToLower(name), ".mp3") {
+				continue
 			}
-		}
-		if len(playlist) == 0 {
-			time.Sleep(5 * time.Second)
-			continue
-		}
-		sort.Strings(playlist) //deterministic order
-
-		for _, name := range playlist {
 			select {
 			case <-ctx.Done():
 				return
