@@ -8,44 +8,70 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/ivugurura/radio-studio/internal/geo"
 )
 
 // StudioFactory lets you customize how studios are structures
 // Useful if later you inject DB handles, metrics, logger, bitrate, etc
-type StudioFactory func(studioID, audioDir string) *Studio
+type RequestValidator func(r *http.Request, studioID, action string) error
+
+type StudioFactory func(id, audioDir string, bitrateKbps int, geoR *geo.Resolver, autoDJFactory AutoDJFactory, snapshotInterval time.Duration) *Studio
+
+type ManagerOption func(*Manager)
+
+func WithRequestValidator(v RequestValidator) ManagerOption {
+	return func(m *Manager) { m.validator = v }
+}
+
+func WithStudioFactory(f StudioFactory) ManagerOption {
+	return func(m *Manager) { m.factory = f }
+}
+
+func WithDefaultBitrate(kbps int) ManagerOption {
+	return func(m *Manager) { m.defaultBitrateKbps = kbps }
+}
+
+func WithSnapshotInterval(d time.Duration) ManagerOption {
+	return func(m *Manager) { m.snapshotInterval = d }
+}
+
+func WithAutoDJFactory(f AutoDJFactory) ManagerOption {
+	return func(m *Manager) { m.autoDJFactory = f }
+}
 
 // Manager coordinates all studios
 type Manager struct {
 	mu           sync.RWMutex
 	studios      map[string]*Studio
 	audioBaseDir string
+	geoResolver  *geo.Resolver
 
 	defaultBitrateKbps int
-	factory            StudioFactory
+	snapshotInterval   time.Duration
+	autoDJFactory      AutoDJFactory
 
-	// (Optional) Hook for request auth/validation before routing
-	// Return non-nil error to abort request
-	RequestValidator func(r *http.Request, studioID, action string) error
+	validator RequestValidator
+	factory   StudioFactory
 }
 
 // NewManager create a new Manager
 // defaultBitrateKbps influencesthe AutoDJ pacing logic for all new studio(if you use pacing version)
-func NewManager(baseDir string, defaultBitrateKbps int) *Manager {
+func NewManager(baseDir string, geoR *geo.Resolver, opts ...ManagerOption) *Manager {
 	m := &Manager{
 		studios:            make(map[string]*Studio),
 		audioBaseDir:       baseDir,
-		defaultBitrateKbps: defaultBitrateKbps,
+		defaultBitrateKbps: 128,
+		geoResolver:        geoR,
+		snapshotInterval:   5 * time.Second,
+		autoDJFactory:      NewAutoDJ,
+		factory: func(id, dir string, bitrate int, geoR *geo.Resolver, dj AutoDJFactory, snapInt time.Duration) *Studio {
+			return NewStudio(id, dir, bitrate, geoR, dj, snapInt)
+		},
 	}
 
-	// Default factory using NewStudio + NewAutoDJ pattern
-	m.factory = func(studioID, audioDir string) *Studio {
-		// Inject AutoDJ with a chosen bitrate (fallback if you have constant bitrate MP3s)
-		autoDJFactory := func(broadcast func([]byte)) *AutoDJ {
-			// If the pacing version with bitrate is used
-			return NewAutoDJ(audioDir, m.defaultBitrateKbps, broadcast)
-		}
-		//
-		return NewStudio(studioID, audioDir, autoDJFactory)
+	for _, o := range opts {
+		o(m)
 	}
 	return m
 }
@@ -62,35 +88,11 @@ func (m *Manager) RegisterStudio(studioID string) *Studio {
 	if s, ok := m.studios[studioID]; ok {
 		return s
 	}
-	studioAudioDir := filepath.Join(m.audioBaseDir, studioID)
-	studio := m.factory(studioID, studioAudioDir)
+	dir := filepath.Join(m.audioBaseDir, studioID)
+	studio := m.factory(studioID, dir, m.defaultBitrateKbps, m.geoResolver, m.autoDJFactory, m.snapshotInterval)
 	m.studios[studioID] = studio
-	log.Printf("Manager: registered studio %s (audioDir=%s)", studioID, studioAudioDir)
+	log.Printf("Manager: registered studio %s (audioDir=%s)", studioID, dir)
 
-	return studio
-}
-
-// RegisterStudioWithBitrate allows a custom bitrate pacing for a specific studio
-// Only applies on creation; exisiting studios are not modified
-func (m *Manager) RegisterStudioWithBitrate(studioID string, bitrateKbps int) *Studio {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if s, ok := m.studios[studioID]; ok {
-		return s
-	}
-
-	audioDir := filepath.Join(m.audioBaseDir, studioID)
-	bit := bitrateKbps
-	if bit <= 0 {
-		bit = m.defaultBitrateKbps
-	}
-
-	// local factory override (doesn't mutate global default)
-	studio := NewStudio(studioID, audioDir, func(broadcast func([]byte)) *AutoDJ {
-		return NewAutoDJ(audioDir, bit, broadcast)
-	})
-	m.studios[studioID] = studio
-	log.Printf("Manager: registered studio %s with bitrate=%dkbps (audioDir=%s)", studioID, bit, audioDir)
 	return studio
 }
 
@@ -184,21 +186,15 @@ func (m *Manager) RouteStudioRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Optional validator (auth / ACL)
-	if m.RequestValidator != nil {
-		if err := m.RequestValidator(r, studioID, action); err != nil {
-			http.Error(w, "Unauthorised", http.StatusUnauthorized)
-			return
-		}
-	}
-
 	switch action {
 	case "live":
 		studio.HandleLiveIngest(w, r)
 	case "listen":
 		studio.HandleListen(w, r)
 	case "status":
-		studio.handleStatus(w, r)
+		studio.HandleStatus(w, r)
+	case "snapshot":
+		studio.HandleSnapshot(w, r)
 	default:
 		http.Error(w, "Unkown action", http.StatusNotFound)
 	}

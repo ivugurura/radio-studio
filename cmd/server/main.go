@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/ivugurura/radio-studio/config"
+	"github.com/ivugurura/radio-studio/internal/geo"
 	"github.com/ivugurura/radio-studio/internal/stream"
 	"github.com/joho/godotenv"
 )
@@ -13,8 +14,15 @@ import (
 func main() {
 	_ = godotenv.Load()
 	cfg := config.LoadConfig()
+	geoResolver := geo.NewResolver(cfg.GeoIPDBPath, cfg.IPHashSalt, cfg.EnableGeoIp)
+	defer geoResolver.Close()
 
-	manager := stream.NewManager(cfg.AudioDir, 128)
+	manager := stream.NewManager(
+		cfg.AudioDir,
+		geoResolver,
+		stream.WithDefaultBitrate(cfg.DefaultBitrateKbps),
+		stream.WithSnapshotInterval(cfg.SnapshotInterval),
+	)
 
 	manager.RegisterStudio("reformation-rw")
 	manager.RegisterStudio("reformation-congo")

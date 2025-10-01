@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"log"
-	"sync"
 
 	"github.com/ivugurura/radio-studio/internal/listeners"
 	"github.com/oschwald/geoip2-golang"
@@ -13,7 +12,6 @@ import (
 type Resolver struct {
 	db   *geoip2.Reader
 	salt []byte
-	once sync.Once
 	ok   bool
 }
 
@@ -34,11 +32,7 @@ func NewResolver(dbPath string, salt string, enabled bool) *Resolver {
 	return r
 }
 
-func (r *Resolver) hashOnly(l *listeners.Listener) {
-	r.hashAndNull(l)
-}
-
-func (r *Resolver) hashAndNull(l *listeners.Listener) {
+func (r *Resolver) hash(l *listeners.Listener) {
 	if l.RemoteIP == nil {
 		return
 	}
@@ -55,12 +49,12 @@ func (r *Resolver) Close() {
 
 func (r *Resolver) Enrich(l *listeners.Listener) {
 	if !r.ok || l.RemoteIP == nil {
-		r.hashOnly(l)
+		r.hash(l)
 		return
 	}
 	city, err := r.db.City(l.RemoteIP)
 	if err != nil {
-		r.hashOnly(l)
+		r.hash(l)
 		return
 	}
 	if city.Country.IsoCode != "" {
@@ -74,7 +68,7 @@ func (r *Resolver) Enrich(l *listeners.Listener) {
 	}
 	l.Lat = round2(city.Location.Latitude)
 	l.Lon = round2(city.Location.Longitude)
-	r.hashAndNull(l)
+	r.hash(l)
 	l.Enriched.Store(true)
 }
 

@@ -7,41 +7,26 @@ import (
 type Store struct {
 	mu        sync.RWMutex
 	listeners map[string]*Listener
-	byStudio  map[string]map[string]*Listener
 }
 
 func NewStore() *Store {
 	return &Store{
 		listeners: make(map[string]*Listener),
-		byStudio:  make(map[string]map[string]*Listener),
 	}
 }
 
 func (s *Store) Add(l *Listener) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.listeners[l.ID] = l
-	if s.byStudio[l.StudioId] == nil {
-		s.byStudio[l.StudioId] = make(map[string]*Listener)
-	}
-	s.byStudio[l.StudioId][l.ID] = l
+	s.mu.Unlock()
 }
 
 func (s *Store) Remove(id string) *Listener {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	l, ok := s.listeners[id]
-	if !ok {
-		return nil
-	}
+	l := s.listeners[id]
 	delete(s.listeners, id)
 
-	if m := s.byStudio[l.StudioId]; m != nil {
-		delete(m, id)
-		if len(m) == 0 {
-			delete(s.byStudio, l.StudioId)
-		}
-	}
 	return l
 }
 
@@ -52,12 +37,12 @@ func (s *Store) Get(id string) (*Listener, bool) {
 	return l, ok
 }
 
-func (s *Store) ActiveByStudio(studioId string) []*Listener {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var listeners []*Listener
-	for _, l := range s.byStudio[studioId] {
-		if l.DisconnectedAt.IsZero() {
+func (s *Store) Active() []*Listener {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	listeners := make([]*Listener, 0, len(s.listeners))
+	for _, l := range s.listeners {
+		if l.DisconnectedAt.Load() == nil {
 			listeners = append(listeners, l)
 		}
 	}

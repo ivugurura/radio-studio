@@ -1,6 +1,8 @@
 package config
 
 import (
+	"fmt"
+	"log"
 	"os"
 	"time"
 )
@@ -13,6 +15,8 @@ type Config struct {
 	GeoIPDBPath string
 	IPHashSalt  string
 	EnableGeoIp bool
+
+	DefaultBitrateKbps int
 
 	// Backend integration
 	BackendIngestURL   string
@@ -40,17 +44,29 @@ func LoadConfig() *Config {
 		BackendAPIKey:      get("BACKEND_API_KEY", ""),
 		EventFlushInterval: durationEnv("EVENT_FLUSH_INTERVAL", 5*time.Second),
 		SnapshotInterval:   durationEnv("SNAPSHOT_INTERVAL", 5*time.Second),
+		DefaultBitrateKbps: intEnv("DEFAULT_BITRATE_KBPS", 128),
 	}
 
 	return cfg
 }
 
-func durationEnv(key string, dfault time.Duration) time.Duration {
+func durationEnv(key string, def time.Duration) time.Duration {
 	if v := os.Getenv(key); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
 			return d
 		}
+		log.Printf("config: invalid duration in %s=%s (using default)", key, v)
 	}
-	return dfault
+	return def
+}
+
+func intEnv(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		var n int
+		if _, err := fmt.Sscanf(v, "%d", &n); err == nil {
+			return n
+		}
+	}
+	return def
 }

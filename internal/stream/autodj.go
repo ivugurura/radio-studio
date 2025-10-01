@@ -9,67 +9,70 @@ import (
 	"time"
 )
 
-type AutoDJ struct {
-	AudioDir          string
-	broadcast         func([]byte)
-	targetBitrateKbps int // configure (e.g. 128)
+type AutoDJRunner interface {
+	Play(ctx context.Context)
 }
 
-func NewAutoDJ(audioDir string, bitrateKbps int, broadcast func([]byte)) *AutoDJ {
+type AutoDJFactory func(audioDir string, bitrateKbps int, push func([]byte)) AutoDJRunner
+
+type AutoDJ struct {
+	AudioDir    string
+	push        func([]byte)
+	bitrateKbps int // configure (e.g. 128)
+}
+
+func NewAutoDJ(audioDir string, bitrateKbps int, push func([]byte)) AutoDJRunner {
 	return &AutoDJ{
-		AudioDir:          audioDir,
-		targetBitrateKbps: bitrateKbps,
-		broadcast:         broadcast,
+		AudioDir:    audioDir,
+		bitrateKbps: bitrateKbps,
+		push:        push,
 	}
 }
 
 func (a *AutoDJ) Play(ctx context.Context) {
 	const chunkSize = 8192 // bigger chunk improves throughput vs overhead
-
+	// Naive pacing using target bitrate if provided; assume CBR.
+	bytesPerSec := (a.bitrateKbps * 1000) / 8
+	if bytesPerSec <= 0 {
+		bytesPerSec = 16000 // fallback ~128 kbps
+	}
 	for {
+		// Check for stop before scanning playlist.
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
 
-		files, err := os.ReadDir(a.AudioDir)
+		entries, err := os.ReadDir(a.AudioDir)
 		if err != nil {
-			log.Printf("AutoDJ: could not read dir %s: %v", a.AudioDir, err)
 			time.Sleep(5 * time.Second)
 			continue
 		}
-		// var playlist []string
-		// for _, e := range entries {
-		// 	if e.IsDir() {
-		// 		continue
-		// 	}
-		// 	name := e.Name()
-		// 	if strings.HasSuffix(strings.ToLower(name), ".mp3") {
-		// 		playlist = append(playlist, name)
-		// 	}
-		// }
-		// if len(files) == 0 {
-		// 	time.Sleep(5 * time.Second)
-		// 	continue
-		// }
+		var playlist []string
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			if strings.HasSuffix(strings.ToLower(name), ".mp3") {
+				playlist = append(playlist, name)
+			}
+		}
 		// sort.Strings(playlist) //deterministic order
 
-		for _, f := range files {
-			if f.IsDir() {
-				continue
-			}
-			name := f.Name()
-			if !strings.HasSuffix(strings.ToLower(name), ".mp3") {
-				continue
-			}
+		if len(playlist) == 0 {
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		for _, file := range playlist {
 			select {
 			case <-ctx.Done():
 				return
 			default:
 			}
 
-			path := filepath.Join(a.AudioDir, name)
+			path := filepath.Join(a.AudioDir, file)
 			f, err := os.Open(path)
 			if err != nil {
 				log.Printf("AutoDJ: could not open file %s: %v", path, err)
@@ -77,7 +80,7 @@ func (a *AutoDJ) Play(ctx context.Context) {
 			}
 			log.Printf("AutoDJ: playing %s", path)
 
-			bytesPerSec := (a.targetBitrateKbps * 1000) / 8
+			// bytesPerSec := (a.targetBitrateKbps * 1000) / 8
 			start := time.Now()
 			var sentBytes int64
 
@@ -95,7 +98,7 @@ func (a *AutoDJ) Play(ctx context.Context) {
 					// COPY the data so it is immutable for listeners
 					chunk := make([]byte, n)
 					copy(chunk, buf[:n])
-					a.broadcast(chunk)
+					a.push(chunk)
 					sentBytes += int64(n)
 
 					//pacing
@@ -106,6 +109,12 @@ func (a *AutoDJ) Play(ctx context.Context) {
 						sleep := min(expectedElapsed-actual, 500*time.Millisecond)
 						time.Sleep(sleep)
 					}
+					// pacing
+					// expected := time.Duration(float64(sentBytes) / float64(bytesPerSec) * float64(time.Second))
+					// diff := expected - time.Since(start)
+					// if diff > 0 && diff < 700*time.Millisecond {
+					// 	time.Sleep(diff)
+					// }
 
 					// (Optional) basic pacing if you find it necessary:
 					// Assume average bitrate 128 kbps = 16000 bytes/sec
@@ -118,6 +127,12 @@ func (a *AutoDJ) Play(ctx context.Context) {
 				if err != nil {
 					// EOF or read error -> go to next file
 					break
+				}
+				select {
+				case <-ctx.Done():
+					f.Close()
+					return
+				default:
 				}
 			}
 			_ = f.Close()

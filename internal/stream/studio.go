@@ -2,6 +2,7 @@ package stream
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log"
 	"net/http"
@@ -11,16 +12,34 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/ivugurura/radio-studio/internal/geo"
+	"github.com/ivugurura/radio-studio/internal/listeners"
+	"github.com/ivugurura/radio-studio/internal/netutil"
 )
 
-type ListenerState struct {
+type StudioSnapshot struct {
+	GeneratedAt time.Time      `json:"generated_at"`
+	StudioID    string         `json:"studio_id"`
+	Active      int            `json:"active"`
+	Countries   map[string]int `json:"countries"`
+	ClientTypes map[string]int `json:"client_types"`
+	BytesTotal  int64          `json:"bytes_total"`
+}
+
+type StreamListener struct {
+	l             *listeners.Listener
 	ch            chan []byte
 	droppedInARow int
 }
 
 // Studio represents a radio studio/channel
 type Studio struct {
-	ID string
+	ID          string
+	audioDir    string
+	bitrateKbps int
 
 	// Live ingest (if present)
 	liveMu     sync.RWMutex
@@ -31,33 +50,66 @@ type Studio struct {
 	feed chan []byte
 
 	// listeners receives bytes (fan-out)
-	listenersMu sync.RWMutex
-	listeners   map[*ListenerState]struct{}
+	listenersMu    sync.RWMutex
+	listeners      map[*StreamListener]struct{}
+	listenersStore *listeners.Store
 
-	droppedFrames atomic.Int64
+	snapshotMu       sync.RWMutex
+	lastSnapshot     StudioSnapshot
+	snapshotInterval time.Duration
+	stop             chan struct{}
+
+	geoResolver   *geo.Resolver
+	autoDJFactory AutoDJFactory
+	autoDJCancel  context.CancelFunc
 }
 
-func NewStudio(id string, dir string, audiodjFactory func(broadcast func([]byte)) *AutoDJ) *Studio {
+func NewStudio(id string, dir string, brKbps int, geoR *geo.Resolver, autodjF AutoDJFactory, snapIn time.Duration) *Studio {
 	s := &Studio{
-		ID:        id,
-		feed:      make(chan []byte, 8192),
-		listeners: make(map[*ListenerState]struct{}),
+		ID:               id,
+		audioDir:         dir,
+		bitrateKbps:      brKbps,
+		feed:             make(chan []byte, 4096),
+		listenersStore:   listeners.NewStore(),
+		listeners:        make(map[*StreamListener]struct{}),
+		geoResolver:      geoR,
+		autoDJFactory:    autodjF,
+		snapshotInterval: snapIn,
+		stop:             make(chan struct{}),
 	}
-
-	// Create AutoDJ with factory (lets you inject bitrate)
-	autodj := audiodjFactory(func(data []byte) {
-		if !s.liveActive.Load() {
-			s.pushToFeed(data)
-		}
-	})
 
 	// Start distributor + AutoDJ
 	go s.distribute()
-	go autodj.Play(context.Background())
+	if autodjF != nil {
+		s.startAutoDJ()
+	}
+	go s.snapshotLoop()
 	return s
 }
 
-func (s *Studio) pushToFeed(data []byte) {
+func (s *Studio) startAutoDJ() {
+	ctx, cancel := context.WithCancel(context.Background())
+	s.autoDJCancel = cancel
+	runner := s.autoDJFactory(s.audioDir, s.bitrateKbps, func(b []byte) {
+		s.push(b)
+	})
+	go runner.Play(ctx)
+}
+
+func (s *Studio) snapshotLoop() {
+	t := time.NewTicker(s.snapshotInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-t.C:
+			s.buildSnapshot()
+		case <-s.stop:
+			return
+		}
+	}
+}
+
+func (s *Studio) push(data []byte) {
 	// Non-blocking feed send; if full, drop (rare if sized well)
 	select {
 	case s.feed <- data:
@@ -66,10 +118,45 @@ func (s *Studio) pushToFeed(data []byte) {
 	}
 }
 
-func (s *Studio) removeListener(ls *ListenerState) {
+func (s *Studio) removeListener(sl *StreamListener) {
 	s.listenersMu.Lock()
-	delete(s.listeners, ls)
+	delete(s.listeners, sl)
 	s.listenersMu.Unlock()
+}
+
+func (s *Studio) buildSnapshot() {
+	active := s.listenersStore.Active()
+	snap := StudioSnapshot{
+		GeneratedAt: time.Now().UTC(),
+		StudioID:    s.ID,
+		Countries:   make(map[string]int),
+		ClientTypes: make(map[string]int),
+	}
+	var totalBytes int64
+	for _, l := range active {
+		snap.Active++
+		c := l.Country
+		if c == "" {
+			c = "UN"
+		}
+		snap.Countries[c]++
+		ct := l.ClientType
+		if ct == "" {
+			ct = "unknown"
+		}
+		snap.ClientTypes[ct]++
+		totalBytes += l.ByteSent.Load()
+	}
+	snap.BytesTotal = totalBytes
+	s.snapshotMu.Lock()
+	s.lastSnapshot = snap
+	s.snapshotMu.Unlock()
+}
+
+func (s *Studio) Snapshot() StudioSnapshot {
+	s.snapshotMu.RLock()
+	defer s.snapshotMu.RUnlock()
+	return s.lastSnapshot
 }
 
 func (s *Studio) distribute() {
@@ -90,11 +177,16 @@ func (s *Studio) distribute() {
 					log.Printf("Studio %s: dropped slow listener", s.ID)
 				}
 			}
+			ls.l.ByteSent.Add(int64(len(data)))
+			// Heartbeat update every ~5s
+			if ptr := ls.l.LastHeartbeat.Load(); ptr != nil {
+				if time.Since(*ptr) > 5*time.Second {
+					now := time.Now()
+					ls.l.LastHeartbeat.Store(&now)
+				}
+			}
 		}
 		s.listenersMu.RUnlock()
-		if v := s.droppedFrames.Load(); v > 0 && v%500 == 0 {
-			log.Printf("Studio %s: dropped listener frames=%d (consider larger listener buffers)", s.ID, v)
-		}
 	}
 	log.Printf("Studio %s: distributor stopped", s.ID)
 }
@@ -124,7 +216,7 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 		if n > 0 {
 			chunk := make([]byte, n)
 			copy(chunk, buf[:n])
-			s.pushToFeed(chunk)
+			s.push(chunk)
 		}
 		if err != nil {
 			break
@@ -156,25 +248,45 @@ func (s *Studio) HandleListen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ls := &ListenerState{
-		ch: make(chan []byte, 512),
+	id := uuid.NewString()
+	ip := netutil.ExtractClientIp(r)
+	now := time.Now()
+	userAgent := r.Header.Get("User-Agent")
+	l := &listeners.Listener{
+		ID:          id,
+		StudioId:    s.ID,
+		RemoteIP:    ip,
+		UserAgent:   userAgent,
+		ClientType:  netutil.ClassifyUserAgent(userAgent),
+		ConnectedAt: now,
+	}
+	l.LastHeartbeat.Store(&now)
+	s.listenersStore.Add(l)
+
+	// Enrich asynchronously (non-blocking)
+	go s.geoResolver.Enrich(l)
+
+	sl := &StreamListener{
+		l:  l,
+		ch: make(chan []byte, 2048),
 	}
 	s.listenersMu.Lock()
-	s.listeners[ls] = struct{}{}
+	s.listeners[sl] = struct{}{}
 	total := len(s.listeners)
 	s.listenersMu.Unlock()
 	log.Printf("Studio %s: new listener (total=%d)", s.ID, total)
 
 	defer func() {
-		s.removeListener(ls)
+		l.MarkDisconnected()
+		s.listenersMu.Lock()
+		delete(s.listeners, sl)
+		s.listenersMu.Unlock()
+		s.listenersStore.Remove(l.ID)
+		close(sl.ch)
 		log.Printf("Studio %s: listener disconnected", s.ID)
 	}()
 
-	// Optional “kickstart”; you can remove if you suspect issues.
-	// w.Write([]byte{0, 0, 0, 0})
-	// flusher.Flush()
-
-	for data := range ls.ch {
+	for data := range sl.ch {
 		if len(data) == 0 {
 			continue
 		}
@@ -186,7 +298,7 @@ func (s *Studio) HandleListen(w http.ResponseWriter, r *http.Request) {
 }
 
 // Example status endpoint (extend with richer JSON / metrics).
-func (s *Studio) handleStatus(w http.ResponseWriter, r *http.Request) {
+func (s *Studio) HandleStatus(w http.ResponseWriter, r *http.Request) {
 	// Simple plain text (replace with JSON if you add a JSON encoder)
 	s.listenersMu.RLock()
 	listenerCount := len(s.listeners)
@@ -202,6 +314,13 @@ func (s *Studio) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"", // newline at end
 		}, "\n"),
 	))
+}
+
+func (s *Studio) HandleSnapshot(w http.ResponseWriter, r *http.Request) {
+	snap := s.Snapshot()
+	w.Header().Set("Content-Type", "application/json")
+	enc := json.NewEncoder(w)
+	_ = enc.Encode(snap)
 }
 
 func SortedMP3Files(dir string) ([]string, error) {

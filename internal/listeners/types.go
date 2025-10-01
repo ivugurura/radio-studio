@@ -12,7 +12,7 @@ type Listener struct {
 
 	// Connection metadata
 	ConnectedAt    time.Time
-	DisconnectedAt time.Time
+	DisconnectedAt atomic.Pointer[time.Time]
 
 	// Network / Client
 	RemoteIP   net.IP
@@ -33,5 +33,6 @@ type Listener struct {
 }
 
 func (l *Listener) MarkDisconnected() {
-	l.DisconnectedAt = time.Now()
+	now := time.Now()
+	l.DisconnectedAt.Store(&now)
 }
