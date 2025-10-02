@@ -46,6 +46,10 @@ type Studio struct {
 	liveIngest io.ReadCloser
 	liveActive atomic.Bool
 
+	// In Studio struct
+	liveMetaMu sync.RWMutex
+	liveMeta   *LiveMeta
+
 	// Central feed: all upstream audio goes here (AutoDJ or live)
 	feed chan []byte
 
@@ -85,6 +89,29 @@ func NewStudio(id string, dir string, brKbps int, geoR *geo.Resolver, autodjF Au
 	}
 	go s.snapshotLoop()
 	return s
+}
+
+func (s *Studio) setLiveMeta(m LiveMeta) {
+	s.liveMetaMu.Lock()
+	s.liveMeta = &m
+	s.liveMetaMu.Unlock()
+}
+
+func (s *Studio) clearLiveMeta() {
+	s.liveMetaMu.Lock()
+	s.liveMeta = nil
+	s.liveMetaMu.Unlock()
+}
+
+func (s *Studio) LiveMeta() *LiveMeta {
+	s.liveMetaMu.RLock()
+	defer s.liveMetaMu.RUnlock()
+	if s.liveMeta == nil {
+		return nil
+	}
+	// Return a copy
+	m := *s.liveMeta
+	return &m
 }
 
 func (s *Studio) startAutoDJ() {
@@ -193,7 +220,7 @@ func (s *Studio) distribute() {
 
 // HandleLiveIngest is called when a live encoder (e.g., BUTT) streams audio to the server.
 // Only one live stream at a time is supported per studio.
-func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
+func (s *Studio) HandleLiveIngestV1(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost && r.Method != http.MethodPut {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
