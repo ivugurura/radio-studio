@@ -20,6 +20,14 @@ import (
 	"github.com/ivugurura/radio-studio/internal/netutil"
 )
 
+type NowPlayingResponse struct {
+	StudioID   string    `json:"studio_id"`
+	Current    string    `json:"current"`
+	Next       string    `json:"next,omitempty"`
+	StartedAt  time.Time `json:"started_at"`
+	ElapsedSec float64   `json:"elapsed_sec"`
+}
+
 type StudioSnapshot struct {
 	GeneratedAt time.Time      `json:"generated_at"`
 	StudioID    string         `json:"studio_id"`
@@ -27,9 +35,12 @@ type StudioSnapshot struct {
 	Countries   map[string]int `json:"countries"`
 	ClientTypes map[string]int `json:"client_types"`
 	BytesTotal  int64          `json:"bytes_total"`
+	LiveActive  bool           `json:"live_active"`
+	Current     string         `json:"current"`
+	Next        string         `json:"next"`
 }
 
-type StreamListener struct {
+type streamListener struct {
 	l             *listeners.Listener
 	ch            chan []byte
 	droppedInARow int
@@ -54,18 +65,19 @@ type Studio struct {
 	feed chan []byte
 
 	// listeners receives bytes (fan-out)
-	listenersMu    sync.RWMutex
-	listeners      map[*StreamListener]struct{}
-	listenersStore *listeners.Store
+	listenersMu     sync.RWMutex
+	streamListeners map[*streamListener]struct{}
+	listenersStore  *listeners.Store
 
+	// snapshot
 	snapshotMu       sync.RWMutex
 	lastSnapshot     StudioSnapshot
 	snapshotInterval time.Duration
 	stop             chan struct{}
 
-	geoResolver   *geo.Resolver
-	autoDJFactory AutoDJFactory
-	autoDJCancel  context.CancelFunc
+	geoResolver  *geo.Resolver
+	autoDJ       AutoDJFactory
+	autoDJCancel context.CancelFunc
 }
 
 func NewStudio(id string, dir string, brKbps int, geoR *geo.Resolver, autodjF AutoDJFactory, snapIn time.Duration) *Studio {
@@ -75,9 +87,8 @@ func NewStudio(id string, dir string, brKbps int, geoR *geo.Resolver, autodjF Au
 		bitrateKbps:      brKbps,
 		feed:             make(chan []byte, 4096),
 		listenersStore:   listeners.NewStore(),
-		listeners:        make(map[*StreamListener]struct{}),
+		streamListeners:  make(map[*streamListener]struct{}),
 		geoResolver:      geoR,
-		autoDJFactory:    autodjF,
 		snapshotInterval: snapIn,
 		stop:             make(chan struct{}),
 	}
@@ -117,7 +128,11 @@ func (s *Studio) LiveMeta() *LiveMeta {
 func (s *Studio) startAutoDJ() {
 	ctx, cancel := context.WithCancel(context.Background())
 	s.autoDJCancel = cancel
-	runner := s.autoDJFactory(s.audioDir, s.bitrateKbps, func(b []byte) {
+	runner := s.autoDJ(s.audioDir, s.bitrateKbps, func(b []byte) {
+		// If you want to suppress AutoDJ during live, check s.liveActive.Load() here
+		if s.liveActive.Load() {
+			return
+		}
 		s.push(b)
 	})
 	go runner.Play(ctx)
@@ -136,6 +151,14 @@ func (s *Studio) snapshotLoop() {
 	}
 }
 
+func (s *Studio) Close() {
+	close(s.stop)
+	if s.autoDJCancel != nil {
+		s.autoDJCancel()
+	}
+	close(s.feed)
+}
+
 func (s *Studio) push(data []byte) {
 	// Non-blocking feed send; if full, drop (rare if sized well)
 	select {
@@ -145,9 +168,9 @@ func (s *Studio) push(data []byte) {
 	}
 }
 
-func (s *Studio) removeListener(sl *StreamListener) {
+func (s *Studio) removeListener(sl *streamListener) {
 	s.listenersMu.Lock()
-	delete(s.listeners, sl)
+	delete(s.streamListeners, sl)
 	s.listenersMu.Unlock()
 }
 
@@ -190,7 +213,7 @@ func (s *Studio) distribute() {
 	log.Printf("Studio %s: distributer started", s.ID)
 	for data := range s.feed {
 		s.listenersMu.RLock()
-		for ls := range s.listeners {
+		for ls := range s.streamListeners {
 			select {
 			case ls.ch <- data:
 				ls.droppedInARow = 0
@@ -206,8 +229,8 @@ func (s *Studio) distribute() {
 			}
 			ls.l.ByteSent.Add(int64(len(data)))
 			// Heartbeat update every ~5s
-			if ptr := ls.l.LastHeartbeat.Load(); ptr != nil {
-				if time.Since(*ptr) > 5*time.Second {
+			if hb := ls.l.LastHeartbeat.Load(); hb != nil {
+				if time.Since(*hb) > 5*time.Second {
 					now := time.Now()
 					ls.l.LastHeartbeat.Store(&now)
 				}
@@ -293,20 +316,20 @@ func (s *Studio) HandleListen(w http.ResponseWriter, r *http.Request) {
 	// Enrich asynchronously (non-blocking)
 	go s.geoResolver.Enrich(l)
 
-	sl := &StreamListener{
+	sl := &streamListener{
 		l:  l,
 		ch: make(chan []byte, 2048),
 	}
 	s.listenersMu.Lock()
-	s.listeners[sl] = struct{}{}
-	total := len(s.listeners)
+	s.streamListeners[sl] = struct{}{}
+	total := len(s.streamListeners)
 	s.listenersMu.Unlock()
 	log.Printf("Studio %s: new listener (total=%d)", s.ID, total)
 
 	defer func() {
 		l.MarkDisconnected()
 		s.listenersMu.Lock()
-		delete(s.listeners, sl)
+		delete(s.streamListeners, sl)
 		s.listenersMu.Unlock()
 		s.listenersStore.Remove(l.ID)
 		close(sl.ch)
@@ -314,9 +337,6 @@ func (s *Studio) HandleListen(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	for data := range sl.ch {
-		if len(data) == 0 {
-			continue
-		}
 		if _, err := w.Write(data); err != nil {
 			break
 		}
@@ -328,7 +348,7 @@ func (s *Studio) HandleListen(w http.ResponseWriter, r *http.Request) {
 func (s *Studio) HandleStatus(w http.ResponseWriter, r *http.Request) {
 	// Simple plain text (replace with JSON if you add a JSON encoder)
 	s.listenersMu.RLock()
-	listenerCount := len(s.listeners)
+	listenerCount := len(s.streamListeners)
 	s.listenersMu.RUnlock()
 
 	live := s.liveActive.Load()
