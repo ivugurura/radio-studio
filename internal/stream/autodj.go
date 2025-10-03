@@ -26,9 +26,10 @@ type AutoDJ interface {
 	Skip()
 	ForceReload()
 	Stop()
+	NowPlaying() (Track, Track, time.Time, bool) // current, next, startedAt, ok
 }
 
-type AutoDJFactory func(audioDir string, bitrateKbps int, push func([]byte)) AutoDJ
+type AutoDJFactory func(dir string, bitrate int, push func([]byte)) AutoDJ
 
 type autoDJ struct {
 	dir         string
