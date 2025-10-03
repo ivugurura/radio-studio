@@ -2,7 +2,6 @@ package stream
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"log"
 	"net/http"
@@ -38,6 +37,12 @@ type StudioSnapshot struct {
 	LiveActive  bool           `json:"live_active"`
 	Current     string         `json:"current"`
 	Next        string         `json:"next"`
+}
+
+type studioStatus struct {
+	Studio         string `json:"studio"`
+	IsLive         bool   `json:"is_live"`
+	ListenersCount int    `json:"listeners_count"`
 }
 
 type streamListener struct {
@@ -76,11 +81,11 @@ type Studio struct {
 	stop             chan struct{}
 
 	geoResolver  *geo.Resolver
-	autoDJ       AutoDJFactory
+	autoDJ       AutoDJ
 	autoDJCancel context.CancelFunc
 }
 
-func NewStudio(id string, dir string, brKbps int, geoR *geo.Resolver, autodjF AutoDJFactory, snapIn time.Duration) *Studio {
+func NewStudio(id string, dir string, brKbps int, geoR *geo.Resolver, autoDJF AutoDJFactory, snapIn time.Duration) *Studio {
 	s := &Studio{
 		ID:               id,
 		audioDir:         dir,
@@ -95,8 +100,17 @@ func NewStudio(id string, dir string, brKbps int, geoR *geo.Resolver, autodjF Au
 
 	// Start distributor + AutoDJ
 	go s.distribute()
-	if autodjF != nil {
-		s.startAutoDJ()
+	if autoDJF != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		s.autoDJCancel = cancel
+		s.autoDJ = autoDJF(dir, brKbps, func(b []byte) {
+			// If you want to suppress AutoDJ during live, check s.liveActive.Load() here
+			if s.liveActive.Load() {
+				return
+			}
+			s.push(b)
+		})
+		go s.autoDJ.Play(ctx)
 	}
 	go s.snapshotLoop()
 	return s
@@ -125,18 +139,18 @@ func (s *Studio) LiveMeta() *LiveMeta {
 	return &m
 }
 
-func (s *Studio) startAutoDJ() {
-	ctx, cancel := context.WithCancel(context.Background())
-	s.autoDJCancel = cancel
-	runner := s.autoDJ(s.audioDir, s.bitrateKbps, func(b []byte) {
-		// If you want to suppress AutoDJ during live, check s.liveActive.Load() here
-		if s.liveActive.Load() {
-			return
-		}
-		s.push(b)
-	})
-	go runner.Play(ctx)
-}
+// func (s *Studio) startAutoDJ() {
+// 	ctx, cancel := context.WithCancel(context.Background())
+// 	s.autoDJCancel = cancel
+// 	runner := s.autoDJ(s.audioDir, s.bitrateKbps, func(b []byte) {
+// 		// If you want to suppress AutoDJ during live, check s.liveActive.Load() here
+// 		if s.liveActive.Load() {
+// 			return
+// 		}
+// 		s.push(b)
+// 	})
+// 	go runner.Play(ctx)
+// }
 
 func (s *Studio) snapshotLoop() {
 	t := time.NewTicker(s.snapshotInterval)
@@ -352,22 +366,49 @@ func (s *Studio) HandleStatus(w http.ResponseWriter, r *http.Request) {
 	s.listenersMu.RUnlock()
 
 	live := s.liveActive.Load()
-	w.Header().Set("Content-Type", "text/plain")
-	_, _ = w.Write([]byte(
-		strings.Join([]string{
-			"studio=" + s.ID,
-			"live=" + boolToString(live),
-			"listeners=" + intToString(listenerCount),
-			"", // newline at end
-		}, "\n"),
-	))
+
+	sStatus := studioStatus{
+		Studio:         s.ID,
+		IsLive:         live,
+		ListenersCount: listenerCount,
+	}
+
+	netutil.ServerResponse(w, 200, "Success", sStatus)
 }
 
 func (s *Studio) HandleSnapshot(w http.ResponseWriter, r *http.Request) {
 	snap := s.Snapshot()
-	w.Header().Set("Content-Type", "application/json")
-	enc := json.NewEncoder(w)
-	_ = enc.Encode(snap)
+
+	netutil.ServerResponse(w, 200, "Success", snap)
+}
+
+func (s *Studio) HandleNowPlaying(w http.ResponseWriter, r *http.Request) {
+	var resp NowPlayingResponse
+	if s.autoDJ != nil {
+		cur, next, started, ok := s.autoDJ.NowPlaying()
+		if ok {
+			resp = NowPlayingResponse{
+				StudioID:   s.ID,
+				Current:    cur.File,
+				Next:       next.File,
+				StartedAt:  started,
+				ElapsedSec: time.Since(started).Seconds(),
+			}
+		}
+	}
+	if resp.Current == "" {
+		resp.StudioID = s.ID
+	}
+	netutil.ServerResponse(w, 200, "Success", resp)
+}
+
+func (s *Studio) HandleSkip(w http.ResponseWriter, r *http.Request) {
+	if s.autoDJ == nil {
+		netutil.ServerResponse(w, 400, "AutoDJ not active", nil)
+		return
+	}
+	s.autoDJ.Skip()
+	netutil.ServerResponse(w, 200, "Skip request", nil)
 }
 
 func SortedMP3Files(dir string) ([]string, error) {

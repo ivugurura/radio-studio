@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ivugurura/radio-studio/internal/geo"
+	"github.com/ivugurura/radio-studio/internal/netutil"
 )
 
 // StudioFactory lets you customize how studios are structures
@@ -195,7 +196,11 @@ func (m *Manager) RouteStudioRequest(w http.ResponseWriter, r *http.Request) {
 		studio.HandleStatus(w, r)
 	case "snapshot":
 		studio.HandleSnapshot(w, r)
+	case "skip":
+		studio.HandleSkip(w, r)
+	case "now":
+		studio.HandleNowPlaying(w, r)
 	default:
-		http.Error(w, "Unkown action", http.StatusNotFound)
+		netutil.ServerResponse(w, 404, "Unknown action", nil)
 	}
 }
