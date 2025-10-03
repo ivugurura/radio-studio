@@ -81,7 +81,7 @@ func (pls *playlistState) ensure() {
 
 func (p *playlistState) current() (Track, bool) {
 	p.mu.RLock()
-	defer p.mu.Unlock()
+	defer p.mu.RUnlock()
 	if p.idx < 0 || p.idx >= len(p.tracks) {
 		return Track{}, false
 	}
@@ -90,7 +90,7 @@ func (p *playlistState) current() (Track, bool) {
 
 func (p *playlistState) nextTrack() (Track, bool) {
 	p.mu.RLock()
-	defer p.mu.Unlock()
+	defer p.mu.RUnlock()
 	if len(p.tracks) == 0 {
 		return Track{}, false
 	}
