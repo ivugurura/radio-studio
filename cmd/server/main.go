@@ -3,7 +3,6 @@ package main
 import (
 	"log"
 	"net/http"
-	"time"
 
 	"github.com/ivugurura/radio-studio/config"
 	"github.com/ivugurura/radio-studio/internal/geo"
@@ -31,7 +30,7 @@ func main() {
 
 	// optional monitoring
 	stopMon := make(chan struct{})
-	manager.StartMonitor(30*time.Second, stopMon)
+	// manager.StartMonitor(30*time.Second, stopMon)
 
 	defer func() {
 		close(stopMon)
