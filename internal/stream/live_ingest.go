@@ -3,7 +3,6 @@ package stream
 import (
 	"encoding/base64"
 	"errors"
-
 	"io"
 	"log"
 	"net/http"
@@ -149,7 +148,3 @@ func extractLiveMeta(r *http.Request) LiveMeta {
 	}
 	return lm
 }
-
-// yes "A" | head -c 100000000 | \
-// lame -r -s 44.1 -b 128 - - 2>/dev/null | \
-// curl -v -u source:ubugorozi -T - http://localhost:7080/studio/reformation-rw/live

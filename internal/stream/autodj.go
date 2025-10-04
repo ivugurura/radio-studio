@@ -6,9 +6,6 @@ import (
 	"io"
 	"log"
 	"os"
-
-	// "path/filepath"
-	// "strings"
 	"time"
 )
 
@@ -198,101 +195,6 @@ func (a *autoDJ) Play(ctx context.Context) {
 		// After file finishes (or skipped) - advance
 		a.playlist.ensure()
 		a.playlist.advance()
-
-		// entries, err := os.ReadDir(a.dir)
-		// if err != nil {
-		// 	time.Sleep(5 * time.Second)
-		// 	continue
-		// }
-		// var playlist []string
-		// for _, e := range entries {
-		// 	if e.IsDir() {
-		// 		continue
-		// 	}
-		// 	name := e.Name()
-		// 	if strings.HasSuffix(strings.ToLower(name), ".mp3") {
-		// 		playlist = append(playlist, name)
-		// 	}
-		// }
-		// // sort.Strings(playlist) //deterministic order
-
-		// if len(playlist) == 0 {
-		// 	time.Sleep(5 * time.Second)
-		// 	continue
-		// }
-		// for _, file := range playlist {
-		// 	select {
-		// 	case <-ctx.Done():
-		// 		return
-		// 	default:
-		// 	}
-
-		// 	path := filepath.Join(a.AudioDir, file)
-		// 	f, err := os.Open(path)
-		// 	if err != nil {
-		// 		log.Printf("AutoDJ: could not open file %s: %v", path, err)
-		// 		continue
-		// 	}
-		// 	log.Printf("AutoDJ: playing %s", path)
-
-		// 	// bytesPerSec := (a.targetBitrateKbps * 1000) / 8
-		// 	start := time.Now()
-		// 	var sentBytes int64
-
-		// 	buf := make([]byte, chunkSize)
-		// 	for {
-		// 		select {
-		// 		case <-ctx.Done():
-		// 			f.Close()
-		// 			return
-		// 		default:
-		// 		}
-
-		// 		n, err := f.Read(buf)
-		// 		if n > 0 {
-		// 			// COPY the data so it is immutable for listeners
-		// 			chunk := make([]byte, n)
-		// 			copy(chunk, buf[:n])
-		// 			a.push(chunk)
-		// 			sentBytes += int64(n)
-
-		// 			//pacing
-		// 			expectedElapsed := time.Duration(float64(bytesPerSec) * float64(time.Second))
-		// 			actual := time.Since(start)
-		// 			if expectedElapsed > actual {
-		// 				// clamp to avoid very long sleeps due to bitrate mismatch
-		// 				sleep := min(expectedElapsed-actual, 500*time.Millisecond)
-		// 				time.Sleep(sleep)
-		// 			}
-		// 			// pacing
-		// 			// expected := time.Duration(float64(sentBytes) / float64(bytesPerSec) * float64(time.Second))
-		// 			// diff := expected - time.Since(start)
-		// 			// if diff > 0 && diff < 700*time.Millisecond {
-		// 			// 	time.Sleep(diff)
-		// 			// }
-
-		// 			// (Optional) basic pacing if you find it necessary:
-		// 			// Assume average bitrate 128 kbps = 16000 bytes/sec
-		// 			// targetElapsed := time.Duration(float64(sentBytes)/16000.0*float64(time.Second))
-		// 			// delta := targetElapsed - time.Since(start)
-		// 			// if delta > 0 {
-		// 			//     time.Sleep(delta)
-		// 			// }
-		// 		}
-		// 		if err != nil {
-		// 			// EOF or read error -> go to next file
-		// 			break
-		// 		}
-		// 		select {
-		// 		case <-ctx.Done():
-		// 			f.Close()
-		// 			return
-		// 		default:
-		// 		}
-		// 	}
-		// 	_ = f.Close()
-		// 	// Removed fake silence injection. If you need gaps, add real MP3 silence file.
-		// }
 	}
 }
 
