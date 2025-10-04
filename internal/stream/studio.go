@@ -5,10 +5,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"os"
-	"sort"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -409,34 +405,4 @@ func (s *Studio) HandleSkip(w http.ResponseWriter, r *http.Request) {
 	}
 	s.autoDJ.Skip()
 	netutil.ServerResponse(w, 200, "Skip request", nil)
-}
-
-func SortedMP3Files(dir string) ([]string, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]string, 0, len(entries))
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		if strings.HasSuffix(strings.ToLower(name), ".mp3") {
-			out = append(out, name)
-		}
-	}
-	sort.Strings(out)
-	return out, nil
-}
-
-func boolToString(b bool) string {
-	if b {
-		return "true"
-	}
-	return "false"
-}
-
-func intToString(i int) string {
-	return strconv.Itoa(i)
 }
