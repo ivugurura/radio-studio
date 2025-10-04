@@ -176,14 +176,14 @@ func (m *Manager) StartMonitor(interval time.Duration, stop <-chan struct{}) {
 func (m *Manager) RouteStudioRequest(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/studio/"), "/")
 	if len(parts) < 2 {
-		http.Error(w, "Invalid studio endpoint", http.StatusBadRequest)
+		netutil.ServerResponse(w, 400, "Invalid studio endpoint", nil)
 		return
 	}
 
 	studioID, action := parts[0], parts[1]
 	studio, ok := m.GetStudio(studioID)
 	if !ok {
-		http.Error(w, "Studio not found", http.StatusNotFound)
+		netutil.ServerResponse(w, 404, "Studio not found", nil)
 		return
 	}
 
