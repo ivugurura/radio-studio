@@ -100,7 +100,7 @@ func NewAutoDJ(audioDir string, bitrateKbps int, push func([]byte)) AutoDJ {
 func (a *autoDJ) streamFile(ctx context.Context, path string, bytesPerSec, chunkSize int) error {
 	f, err := os.Open(path)
 	if err != nil {
-		return err
+		return &TrackError{Path: path, Kind: "open", Err: err}
 	}
 	defer f.Close()
 
@@ -115,13 +115,11 @@ func (a *autoDJ) streamFile(ctx context.Context, path string, bytesPerSec, chunk
 		case cmd := <-a.ctrl:
 			switch cmd {
 			case cmdSkip:
-				// only skip if still same active file
 				a.lock()
 				same := a.activeFile == path
 				a.unlock()
 				if same {
-					log.Printf("autodj: skip current (%s)", path)
-					return io.EOF
+					return &TrackError{Path: path, Kind: "skipped", Err: io.EOF}
 				}
 			case cmdForceReload:
 				a.playlist.forceReload()
@@ -139,15 +137,15 @@ func (a *autoDJ) streamFile(ctx context.Context, path string, bytesPerSec, chunk
 			sent += int64(n)
 			// pacing
 			expected := time.Duration(float64(sent) / float64(bytesPerSec) * float64(time.Second))
-			if sleep := expected - time.Since(start); sleep > 0 && sleep < 700*time.Microsecond {
+			if sleep := expected - time.Since(start); sleep > 0 && sleep < 700*time.Millisecond {
 				time.Sleep(sleep)
 			}
 		}
 		if rerr != nil {
 			if rerr == io.EOF {
-				return rerr
+				return nil // normal end
 			}
-			return rerr
+			return &TrackError{Path: path, Kind: "read", Err: rerr}
 		}
 	}
 }
@@ -189,8 +187,7 @@ func (a *autoDJ) Play(ctx context.Context) {
 		a.unlock()
 
 		log.Printf("AudioDJ: playing %s", cur.Path)
-		err := a.streamFile(ctx, cur.Path, bytesPerSec, chunkSize)
-		if err != nil {
+		if err := a.streamFile(ctx, cur.Path, bytesPerSec, chunkSize); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return
 			}
@@ -297,4 +294,14 @@ func (a *autoDJ) Play(ctx context.Context) {
 		// 	// Removed fake silence injection. If you need gaps, add real MP3 silence file.
 		// }
 	}
+}
+
+type TrackError struct {
+	Path string
+	Kind string
+	Err  error
+}
+
+func (e *TrackError) Error() string {
+	return e.Kind + ": " + e.Path + ": " + e.Err.Error()
 }
