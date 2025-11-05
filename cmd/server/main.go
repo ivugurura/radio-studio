@@ -16,11 +16,22 @@ func main() {
 	geoResolver := geo.NewResolver(cfg.GeoIPDBPath, cfg.IPHashSalt, cfg.EnableGeoIp)
 	defer geoResolver.Close()
 
+	opts := []stream.ManagerOption{
+		stream.WithDefaultBitrate(cfg.DefaultBitrateKbps),
+		stream.WithSnapshotInterval(cfg.SnapshotInterval),
+	}
+
+	// If playlist URL is configured, use backend-driven AutoDJ
+	if cfg.BackendPlaylistURL != "" {
+		opts = append(opts, stream.WithAutoDJFactory(func(dir string, studioID string, bitrate int, push func([]byte)) stream.AutoDJ {
+			return stream.NewAutoDJWithBackend(dir, studioID, bitrate, push, cfg.BackendPlaylistURL, cfg.BackendAPIKey)
+		}))
+	}
+
 	manager := stream.NewManager(
 		cfg.AudioDir,
 		geoResolver,
-		stream.WithDefaultBitrate(cfg.DefaultBitrateKbps),
-		stream.WithSnapshotInterval(cfg.SnapshotInterval),
+		opts...,
 	)
 
 	manager.RegisterStudio("reformation-rw")
