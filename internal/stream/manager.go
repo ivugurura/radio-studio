@@ -89,7 +89,7 @@ func (m *Manager) RegisterStudio(studioID string) *Studio {
 	if s, ok := m.studios[studioID]; ok {
 		return s
 	}
-	dir := filepath.Join(m.audioBaseDir, studioID)
+	dir := filepath.Join(m.audioBaseDir, studioID, "library", "mp3", "128")
 	studio := m.factory(studioID, dir, m.defaultBitrateKbps, m.geoResolver, m.autoDJFactory, m.snapshotInterval)
 	m.studios[studioID] = studio
 	log.Printf("Manager: registered studio %s (audioDir=%s)", studioID, dir)
