@@ -99,7 +99,7 @@ func NewStudio(id string, dir string, brKbps int, geoR *geo.Resolver, autoDJF Au
 	if autoDJF != nil {
 		ctx, cancel := context.WithCancel(context.Background())
 		s.autoDJCancel = cancel
-		s.autoDJ = autoDJF(dir, brKbps, func(b []byte) {
+		s.autoDJ = autoDJF(dir, id, brKbps, func(b []byte) {
 			// If you want to suppress AutoDJ during live, check s.liveActive.Load() here
 			if s.liveActive.Load() {
 				return
