@@ -21,6 +21,7 @@ type Config struct {
 	// Backend integration
 	BackendIngestURL   string
 	BackendAPIKey      string
+	BackendPlaylistURL string
 	EventFlushInterval time.Duration
 	SnapshotInterval   time.Duration
 }
@@ -36,12 +37,13 @@ func LoadConfig() *Config {
 
 	cfg := &Config{
 		ListenAddr:         get("LISTEN_ADDR", ":8000"),
-		AudioDir:           get("AUDIO_DIR", "./audio"),
-		GeoIPDBPath:        get("GEOIP_DB_PATH", "./GeoLite2-City.mmdb"),
+		AudioDir:           get("AUDIO_DIR", ""),
+		GeoIPDBPath:        get("GEOIP_DB_PATH", "./GeoLite2-City.mmdbw"),
 		IPHashSalt:         get("IP_HASH_SALT", "change-me"),
 		EnableGeoIp:        get("ENABLE_GEOIP", "1") == "1",
 		BackendIngestURL:   get("BACKEND_INGEST_URL", ""), // e.g. https://api.example.com/internal/listener-events
 		BackendAPIKey:      get("BACKEND_API_KEY", ""),
+		BackendPlaylistURL: get("BACKEND_PLAYLIST_URL", ""),
 		EventFlushInterval: durationEnv("EVENT_FLUSH_INTERVAL", 5*time.Second),
 		SnapshotInterval:   durationEnv("SNAPSHOT_INTERVAL", 5*time.Second),
 		DefaultBitrateKbps: intEnv("DEFAULT_BITRATE_KBPS", 128),
