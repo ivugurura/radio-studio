@@ -10,8 +10,12 @@ import (
 )
 
 type Track struct {
-	File string
-	Path string
+	File        string
+	Path        string
+	Title       string
+	Artist      string
+	Album       string
+	DurationSec float64
 }
 
 type playlistState struct {
