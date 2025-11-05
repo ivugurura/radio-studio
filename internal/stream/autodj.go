@@ -202,7 +202,7 @@ func (a *autoDJ) Play(ctx context.Context) {
 		// advance internal index
 		_, _ = a.playlist.advance()
 
-		log.Printf("AudioDJ: playing %s", next.Path)
+		log.Printf("AudioDJ: playing %s", next.File)
 		if err := a.streamFile(ctx, next.Path, bytesPerSec, chunkSize); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return
