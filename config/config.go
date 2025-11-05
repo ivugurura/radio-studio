@@ -38,7 +38,7 @@ func LoadConfig() *Config {
 	cfg := &Config{
 		ListenAddr:         get("LISTEN_ADDR", ":8000"),
 		AudioDir:           get("AUDIO_DIR", ""),
-		GeoIPDBPath:        get("GEOIP_DB_PATH", "./GeoLite2-City.mmdbw"),
+		GeoIPDBPath:        get("GEOIP_DB_PATH", "./GeoLite2-City.mmdb"),
 		IPHashSalt:         get("IP_HASH_SALT", "change-me"),
 		EnableGeoIp:        get("ENABLE_GEOIP", "1") == "1",
 		BackendIngestURL:   get("BACKEND_INGEST_URL", ""), // e.g. https://api.example.com/internal/listener-events
