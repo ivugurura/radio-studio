@@ -21,7 +21,7 @@ type Config struct {
 	// Backend integration
 	BackendIngestURL   string
 	BackendAPIKey      string
-	BackendPlaylistURL string
+	BackendAPI         string
 	EventFlushInterval time.Duration
 	SnapshotInterval   time.Duration
 }
@@ -43,7 +43,7 @@ func LoadConfig() *Config {
 		EnableGeoIp:        get("ENABLE_GEOIP", "1") == "1",
 		BackendIngestURL:   get("BACKEND_INGEST_URL", ""), // e.g. https://api.example.com/internal/listener-events
 		BackendAPIKey:      get("BACKEND_API_KEY", ""),
-		BackendPlaylistURL: get("BACKEND_PLAYLIST_URL", ""),
+		BackendAPI:         get("BACKEND_API", ""),
 		EventFlushInterval: durationEnv("EVENT_FLUSH_INTERVAL", 5*time.Second),
 		SnapshotInterval:   durationEnv("SNAPSHOT_INTERVAL", 5*time.Second),
 		DefaultBitrateKbps: intEnv("DEFAULT_BITRATE_KBPS", 128),
