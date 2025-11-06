@@ -26,7 +26,8 @@ type AutoDJ interface {
 	NowPlaying() (Track, Track, time.Time, bool) // current, next, startedAt, ok
 }
 
-type AutoDJFactory func(dir string, bitrate int, push func([]byte)) AutoDJ
+// default factory (filesystem)
+type AutoDJFactory func(dir string, studioID string, bitrate int, push func([]byte)) AutoDJ
 
 type autoDJ struct {
 	dir         string
@@ -35,7 +36,7 @@ type autoDJ struct {
 
 	ctrl chan djCommand
 
-	playlist *playlistState
+	playlist PlaylistSource
 
 	// now playing metadata (guarded by playlistState's lock + this lightweight lock)
 	nowMu      chan struct{} // simple channel semaphore (size 1)
@@ -83,13 +84,31 @@ func (a *autoDJ) NowPlaying() (Track, Track, time.Time, bool) {
 	return a.current, a.next, a.startedAt, true
 }
 
-func NewAutoDJ(audioDir string, bitrateKbps int, push func([]byte)) AutoDJ {
+func NewAutoDJ(audioDir string, studioID string, bitrateKbps int, push func([]byte)) AutoDJ {
 	return &autoDJ{
 		dir:         audioDir,
 		bitrateKbps: bitrateKbps,
 		push:        push,
 		ctrl:        make(chan djCommand, 8),
 		playlist:    newPlaylistState(audioDir),
+		nowMu:       make(chan struct{}, 1),
+	}
+}
+
+// NewAutoDJWithBackend selects backend-driven playlist if endpoint provided; falls back to filesystem otherwise.
+func NewAutoDJWithBackend(audioDir string, studioID string, bitrateKbps int, push func([]byte), playlistEndpoint string, apiKey string) AutoDJ {
+	var src PlaylistSource
+	if playlistEndpoint != "" {
+		src = newBackendPlaylist(audioDir, studioID, playlistEndpoint, apiKey)
+	} else {
+		src = newPlaylistState(audioDir)
+	}
+	return &autoDJ{
+		dir:         audioDir,
+		bitrateKbps: bitrateKbps,
+		push:        push,
+		ctrl:        make(chan djCommand, 8),
+		playlist:    src,
 		nowMu:       make(chan struct{}, 1),
 	}
 }
@@ -113,6 +132,7 @@ func (a *autoDJ) streamFile(ctx context.Context, path string, bytesPerSec, chunk
 			switch cmd {
 			case cmdSkip:
 				a.lock()
+				// TODO: Please check this Carefully
 				same := a.activeFile == path
 				a.unlock()
 				if same {
@@ -134,8 +154,9 @@ func (a *autoDJ) streamFile(ctx context.Context, path string, bytesPerSec, chunk
 			sent += int64(n)
 			// pacing
 			expected := time.Duration(float64(sent) / float64(bytesPerSec) * float64(time.Second))
-			if sleep := expected - time.Since(start); sleep > 0 && sleep < 700*time.Millisecond {
-				time.Sleep(sleep)
+			elapsed := time.Since(start)
+			if expected > elapsed {
+				time.Sleep(expected - elapsed)
 			}
 		}
 		if rerr != nil {
@@ -148,12 +169,10 @@ func (a *autoDJ) streamFile(ctx context.Context, path string, bytesPerSec, chunk
 }
 
 func (a *autoDJ) Play(ctx context.Context) {
-	const chunkSize = 8192 // bigger chunk improves throughput vs overhead
-	// Naive pacing using target bitrate if provided; assume CBR.
-	bytesPerSec := (a.bitrateKbps * 1000) / 8
-	if bytesPerSec <= 0 {
-		bytesPerSec = 16000 // fallback ~128 kbps
-	}
+	// 128 kbps => 16 KB/s
+	bytesPerSec := int(float64(a.bitrateKbps) * 1000.0 / 8.0)
+	chunkSize := 4096
+
 	for {
 		// Check for stop before scanning playlist.
 		select {
@@ -162,6 +181,7 @@ func (a *autoDJ) Play(ctx context.Context) {
 		default:
 		}
 
+		// ensure we have a playlist
 		a.playlist.ensure()
 		cur, ok := a.playlist.current()
 		if !ok {
@@ -180,16 +200,16 @@ func (a *autoDJ) Play(ctx context.Context) {
 		a.current = cur
 		a.next = next
 		a.startedAt = time.Now()
-		a.activeFile = cur.Path
+		a.activeFile = cur.File
 		a.unlock()
 
-		log.Printf("AudioDJ: playing %s", cur.Path)
-		if err := a.streamFile(ctx, cur.Path, bytesPerSec, chunkSize); err != nil {
+		log.Printf("AudioDJ: playing %s", cur.Title)
+		if err := a.streamFile(ctx, cur.File, bytesPerSec, chunkSize); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return
 			}
 			// log * continue to the enxt track
-			log.Printf("AudioDJ: file ended (%s): %v", cur.File, err)
+			log.Printf("AudioDJ: file ended (%s): %v", cur.Title, err)
 		}
 
 		// After file finishes (or skipped) - advance

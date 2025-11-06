@@ -3,7 +3,6 @@ package main
 import (
 	"log"
 	"net/http"
-	"time"
 
 	"github.com/ivugurura/radio-studio/config"
 	"github.com/ivugurura/radio-studio/internal/geo"
@@ -17,11 +16,23 @@ func main() {
 	geoResolver := geo.NewResolver(cfg.GeoIPDBPath, cfg.IPHashSalt, cfg.EnableGeoIp)
 	defer geoResolver.Close()
 
+	opts := []stream.ManagerOption{
+		stream.WithDefaultBitrate(cfg.DefaultBitrateKbps),
+		stream.WithSnapshotInterval(cfg.SnapshotInterval),
+	}
+
+	// If playlist URL is configured, use backend-driven AutoDJ
+	if cfg.BackendAPI != "" {
+		opts = append(opts, stream.WithAutoDJFactory(func(dir string, studioID string, bitrate int, push func([]byte)) stream.AutoDJ {
+			backendPlaylistURL := cfg.BackendAPI + "/studios/" + studioID + "/playlist"
+			return stream.NewAutoDJWithBackend(dir, studioID, bitrate, push, backendPlaylistURL, cfg.BackendAPIKey)
+		}))
+	}
+
 	manager := stream.NewManager(
 		cfg.AudioDir,
 		geoResolver,
-		stream.WithDefaultBitrate(cfg.DefaultBitrateKbps),
-		stream.WithSnapshotInterval(cfg.SnapshotInterval),
+		opts...,
 	)
 
 	manager.RegisterStudio("reformation-rw")
@@ -31,7 +42,7 @@ func main() {
 
 	// optional monitoring
 	stopMon := make(chan struct{})
-	manager.StartMonitor(30*time.Second, stopMon)
+	// manager.StartMonitor(30*time.Second, stopMon)
 
 	defer func() {
 		close(stopMon)
