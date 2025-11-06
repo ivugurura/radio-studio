@@ -385,8 +385,8 @@ func (s *Studio) HandleNowPlaying(w http.ResponseWriter, r *http.Request) {
 		if ok {
 			resp = NowPlayingResponse{
 				StudioID:   s.ID,
-				Current:    cur.File,
-				Next:       next.File,
+				Current:    cur.Title,
+				Next:       next.Title,
 				StartedAt:  started,
 				ElapsedSec: time.Since(started).Seconds(),
 			}

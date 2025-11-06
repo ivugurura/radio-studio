@@ -10,8 +10,8 @@ import (
 )
 
 type Track struct {
+	ID          string
 	File        string
-	Path        string
 	Title       string
 	Artist      string
 	Album       string
@@ -46,12 +46,12 @@ func (p *playlistState) reload(mod time.Time) {
 		name := e.Name()
 		if strings.HasSuffix(strings.ToLower(name), ".mp3") {
 			list = append(list, Track{
-				File: name,
-				Path: filepath.Join(p.dir, name),
+				Title: name,
+				File:  filepath.Join(p.dir, name),
 			})
 		}
 		sort.Slice(list, func(i int, j int) bool {
-			return list[i].File < list[j].File
+			return list[i].Title < list[j].Title
 		})
 		p.mu.Lock()
 		p.tracks = list

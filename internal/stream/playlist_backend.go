@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 )
@@ -32,6 +31,7 @@ type backendPlaylist struct {
 
 type backendTrack struct {
 	ID              string  `json:"id"`
+	File            string  `json:"file"`
 	Title           string  `json:"title"`
 	Artist          string  `json:"artist,omitempty"`
 	Album           string  `json:"album,omitempty"`
@@ -50,12 +50,8 @@ func newBackendPlaylist(dir string, studioID string, endpoint string, apiKey str
 	}
 }
 
-func (b *backendPlaylist) url() string {
-	return strings.ReplaceAll(b.endpoint, "{studioID}", b.studioID)
-}
-
 func (b *backendPlaylist) fetch() {
-	req, err := http.NewRequest("GET", b.url(), nil)
+	req, err := http.NewRequest("GET", b.endpoint, nil)
 	if err != nil {
 		return
 	}
@@ -69,15 +65,14 @@ func (b *backendPlaylist) fetch() {
 	}
 
 	var bTracks []backendTrack
-	if err := json.NewDecoder(res.Request.Body).Decode(&bTracks); err != nil {
+	if err := json.NewDecoder(res.Body).Decode(&bTracks); err != nil {
 		return
 	}
-
 	var out []Track
 	for _, t := range bTracks {
 		out = append(out, Track{
-			File:        t.Title,
-			Path:        filepath.Join(b.dir, t.ID),
+			ID:          t.ID,
+			File:        filepath.Join(b.dir, t.File),
 			Title:       t.Title,
 			Artist:      t.Artist,
 			Album:       t.Album,
