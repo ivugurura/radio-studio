@@ -183,38 +183,38 @@ func (a *autoDJ) Play(ctx context.Context) {
 
 		// ensure we have a playlist
 		a.playlist.ensure()
-
-		// pick next track
-		next, ok := a.playlist.nextTrack()
+		cur, ok := a.playlist.current()
 		if !ok {
-			time.Sleep(3 * time.Second)
-			continue
+			if c2, ok2 := a.playlist.advance(); ok2 {
+				cur = c2
+				ok = true
+			} else {
+				time.Sleep(3 * time.Second)
+				continue
+			}
 		}
+		next, _ := a.playlist.nextTrack()
 
-		// publish now/next
+		// Update now playing
 		a.lock()
-		a.current = next
-		a.next = Track{}
+		a.current = cur
+		a.next = next
 		a.startedAt = time.Now()
-		a.activeFile = next.File
+		a.activeFile = cur.File
 		a.unlock()
 
-		// advance internal index
-		_, _ = a.playlist.advance()
-
-		log.Printf("AudioDJ: playing %s", next.Title)
-		if err := a.streamFile(ctx, next.File, bytesPerSec, chunkSize); err != nil {
+		log.Printf("AudioDJ: playing %s", cur.Title)
+		if err := a.streamFile(ctx, cur.File, bytesPerSec, chunkSize); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return
 			}
 			// log * continue to the enxt track
-			log.Printf("AudioDJ: file ended (%s): %v", next.Title, err)
+			log.Printf("AudioDJ: file ended (%s): %v", cur.Title, err)
 		}
 
 		// After file finishes (or skipped) - advance
-		a.lock()
-		a.activeFile = ""
-		a.unlock()
+		a.playlist.ensure()
+		a.playlist.advance()
 	}
 }
 
