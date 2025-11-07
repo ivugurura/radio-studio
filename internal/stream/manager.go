@@ -65,7 +65,8 @@ func NewManager(baseDir string, geoR *geo.Resolver, opts ...ManagerOption) *Mana
 		defaultBitrateKbps: 128,
 		geoResolver:        geoR,
 		snapshotInterval:   5 * time.Second,
-		autoDJFactory:      NewAutoDJ,
+		// This line needs a close look
+		// autoDJFactory:      NewAutoDJ,
 		factory: func(id, dir string, bitrate int, geoR *geo.Resolver, dj AutoDJFactory, snapInt time.Duration) *Studio {
 			return NewStudio(id, dir, bitrate, geoR, dj, snapInt)
 		},

@@ -25,7 +25,7 @@ func main() {
 	if cfg.BackendAPI != "" {
 		opts = append(opts, stream.WithAutoDJFactory(func(dir string, studioID string, bitrate int, push func([]byte)) stream.AutoDJ {
 			backendPlaylistURL := cfg.BackendAPI + "/studios/" + studioID + "/playlist"
-			return stream.NewAutoDJWithBackend(dir, studioID, bitrate, push, backendPlaylistURL, cfg.BackendAPIKey)
+			return stream.NewAutoDJ(dir, studioID, bitrate, push, backendPlaylistURL, cfg.BackendAPIKey, cfg.DefaultTrackFile)
 		}))
 	}
 

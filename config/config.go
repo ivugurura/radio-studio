@@ -24,6 +24,9 @@ type Config struct {
 	BackendAPI         string
 	EventFlushInterval time.Duration
 	SnapshotInterval   time.Duration
+
+	// Fallback track
+	DefaultTrackFile string
 }
 
 func LoadConfig() *Config {
@@ -47,6 +50,7 @@ func LoadConfig() *Config {
 		EventFlushInterval: durationEnv("EVENT_FLUSH_INTERVAL", 5*time.Second),
 		SnapshotInterval:   durationEnv("SNAPSHOT_INTERVAL", 5*time.Second),
 		DefaultBitrateKbps: intEnv("DEFAULT_BITRATE_KBPS", 128),
+		DefaultTrackFile:   get("DEFAULT_TRACK_FILE", ""),
 	}
 
 	return cfg
