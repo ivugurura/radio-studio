@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -44,6 +45,8 @@ type autoDJ struct {
 	next       Track
 	startedAt  time.Time
 	activeFile string // internal guard to ensure skip t
+
+	fallbackPath string
 }
 
 func (a *autoDJ) lock() {
@@ -84,32 +87,16 @@ func (a *autoDJ) NowPlaying() (Track, Track, time.Time, bool) {
 	return a.current, a.next, a.startedAt, true
 }
 
-func NewAutoDJ(audioDir string, studioID string, bitrateKbps int, push func([]byte)) AutoDJ {
-	return &autoDJ{
-		dir:         audioDir,
-		bitrateKbps: bitrateKbps,
-		push:        push,
-		ctrl:        make(chan djCommand, 8),
-		playlist:    newPlaylistState(audioDir),
-		nowMu:       make(chan struct{}, 1),
-	}
-}
-
 // NewAutoDJWithBackend selects backend-driven playlist if endpoint provided; falls back to filesystem otherwise.
-func NewAutoDJWithBackend(audioDir string, studioID string, bitrateKbps int, push func([]byte), playlistEndpoint string, apiKey string) AutoDJ {
-	var src PlaylistSource
-	if playlistEndpoint != "" {
-		src = newBackendPlaylist(audioDir, studioID, playlistEndpoint, apiKey)
-	} else {
-		src = newPlaylistState(audioDir)
-	}
+func NewAutoDJ(audioDir string, studioID string, bitrateKbps int, push func([]byte), playlistEndpoint string, apiKey string, fallbackFile string) AutoDJ {
 	return &autoDJ{
-		dir:         audioDir,
-		bitrateKbps: bitrateKbps,
-		push:        push,
-		ctrl:        make(chan djCommand, 8),
-		playlist:    src,
-		nowMu:       make(chan struct{}, 1),
+		dir:          audioDir,
+		bitrateKbps:  bitrateKbps,
+		push:         push,
+		ctrl:         make(chan djCommand, 8),
+		playlist:     newBackendPlaylist(audioDir, studioID, playlistEndpoint, apiKey),
+		nowMu:        make(chan struct{}, 1),
+		fallbackPath: fallbackFile,
 	}
 }
 
@@ -168,6 +155,34 @@ func (a *autoDJ) streamFile(ctx context.Context, path string, bytesPerSec, chunk
 	}
 }
 
+// attempt to stream the fallback track if configured and present.
+// returns true if it started streaming fallback, false otherwise.
+func (a *autoDJ) tryFallback(ctx context.Context, bytesPerSec, chunkSize int) bool {
+	if a.fallbackPath == "" {
+		return false
+	}
+	if _, err := os.Stat(a.fallbackPath); err != nil {
+		return false
+	}
+	_, name := filepath.Split(a.fallbackPath)
+
+	a.lock()
+	a.current = Track{Title: name, File: a.fallbackPath}
+	a.next = Track{}
+	a.startedAt = time.Now()
+	a.activeFile = a.fallbackPath
+	a.unlock()
+
+	err := a.streamFile(ctx, a.fallbackPath, bytesPerSec, chunkSize)
+	if err != nil && !errors.Is(err, io.EOF) {
+		log.Printf("autoDJ: error streaming fallback %s: %v", a.fallbackPath, err)
+	}
+	a.lock()
+	a.activeFile = ""
+	a.unlock()
+	return true
+}
+
 func (a *autoDJ) Play(ctx context.Context) {
 	// 128 kbps => 16 KB/s
 	bytesPerSec := int(float64(a.bitrateKbps) * 1000.0 / 8.0)
@@ -189,6 +204,9 @@ func (a *autoDJ) Play(ctx context.Context) {
 				cur = c2
 				ok = true
 			} else {
+				if a.tryFallback(ctx, bytesPerSec, chunkSize) {
+					continue
+				}
 				time.Sleep(3 * time.Second)
 				continue
 			}

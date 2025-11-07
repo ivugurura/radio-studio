@@ -1,10 +1,9 @@
 package stream
 
 import (
-	"os"
+	"encoding/json"
+	"net/http"
 	"path/filepath"
-	"sort"
-	"strings"
 	"sync"
 	"time"
 )
@@ -18,114 +17,139 @@ type Track struct {
 	DurationSec float64
 }
 
-type playlistState struct {
-	mu          sync.RWMutex
-	tracks      []Track
-	dir         string
-	lastModTime time.Time
-	idx         int
+type PlaylistSource interface {
+	ensure()
+	current() (Track, bool)
+	nextTrack() (Track, bool)
+	advance() (Track, bool)
+	forceReload()
 }
 
-func newPlaylistState(dir string) *playlistState {
-	return &playlistState{
-		dir: dir,
-		idx: -1,
+type backendPlaylist struct {
+	mu        sync.RWMutex
+	studioID  string
+	dir       string
+	endpoint  string
+	apiKey    string
+	tracks    []Track
+	idx       int
+	lastFetch time.Time
+	ttl       time.Duration
+	client    *http.Client
+}
+
+type backendTrack struct {
+	ID              string  `json:"id"`
+	File            string  `json:"file"`
+	Title           string  `json:"title"`
+	Artist          string  `json:"artist,omitempty"`
+	Album           string  `json:"album,omitempty"`
+	DurationSeconds float64 `json:"duration_seconds"`
+}
+
+func newBackendPlaylist(dir string, studioID string, endpoint string, apiKey string) PlaylistSource {
+	return &backendPlaylist{
+		dir:      dir,
+		studioID: studioID,
+		endpoint: endpoint,
+		apiKey:   apiKey,
+		idx:      -1,
+		ttl:      5 * time.Second,
+		client:   &http.Client{Timeout: 5 * time.Second},
 	}
 }
 
-func (p *playlistState) reload(mod time.Time) {
-	entries, err := os.ReadDir(p.dir)
+func (b *backendPlaylist) fetch() {
+	req, err := http.NewRequest("GET", b.endpoint, nil)
 	if err != nil {
 		return
 	}
-	var list []Track
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		if strings.HasSuffix(strings.ToLower(name), ".mp3") {
-			list = append(list, Track{
-				Title: name,
-				File:  filepath.Join(p.dir, name),
-			})
-		}
-		sort.Slice(list, func(i int, j int) bool {
-			return list[i].Title < list[j].Title
+	res, err := b.client.Do(req)
+	if err != nil {
+		return
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return
+	}
+
+	var bTracks []backendTrack
+	if err := json.NewDecoder(res.Body).Decode(&bTracks); err != nil {
+		return
+	}
+	var out []Track
+	for _, t := range bTracks {
+		out = append(out, Track{
+			ID:          t.ID,
+			File:        filepath.Join(b.dir, t.File),
+			Title:       t.Title,
+			Artist:      t.Artist,
+			Album:       t.Album,
+			DurationSec: t.DurationSeconds,
 		})
-		p.mu.Lock()
-		p.tracks = list
-		p.lastModTime = mod
-		tracksCount := len(p.tracks)
-		if tracksCount == 0 {
-			p.idx = -1
-		} else if p.idx >= tracksCount {
-			p.idx = 0
-		}
-		p.mu.Unlock()
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.tracks = out
+
+	if len(b.tracks) == 0 {
+		b.idx = -1
+	} else if b.idx >= len(b.tracks) {
+		b.idx = 0
+	}
+	b.lastFetch = time.Now()
+}
+
+func (b *backendPlaylist) ensure() {
+	b.mu.RLock()
+	stale := len(b.tracks) == 0 || time.Since(b.lastFetch) > b.ttl
+	b.mu.RUnlock()
+
+	if stale {
+		b.fetch()
 	}
 }
 
-// ensure (re)loads playlist if directory mod time has advanced or empty
-func (pls *playlistState) ensure() {
-	info, err := os.Stat(pls.dir)
-	if err != nil {
-		return
-	}
-	mod := info.ModTime()
-	pls.mu.RLock()
-	stale := len(pls.tracks) == 0 || mod.After(pls.lastModTime)
-	pls.mu.RUnlock()
+func (b *backendPlaylist) current() (Track, bool) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
 
-	if !stale {
-		return
-	}
-	pls.reload(mod)
-}
-
-func (p *playlistState) current() (Track, bool) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	if p.idx < 0 || p.idx >= len(p.tracks) {
+	if b.idx < 0 || b.idx >= len(b.tracks) {
 		return Track{}, false
 	}
-	return p.tracks[p.idx], true
+	return b.tracks[b.idx], true
 }
 
-func (p *playlistState) nextTrack() (Track, bool) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	if len(p.tracks) == 0 {
+func (b *backendPlaylist) nextTrack() (Track, bool) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if len(b.tracks) == 0 {
 		return Track{}, false
 	}
-	if p.idx < 0 {
-		// Not started yet; "next" is the first
-		return p.tracks[0], true
+	if b.idx < 0 {
+		return b.tracks[0], true
 	}
-	n := (p.idx + 1) % len(p.tracks)
-	return p.tracks[n], true
+	n := (b.idx + 1) % len(b.tracks)
+	return b.tracks[n], true
 }
 
-func (p *playlistState) advance() (Track, bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if len(p.tracks) == 0 {
-		p.idx = -1
+func (b *backendPlaylist) advance() (Track, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.tracks) == 0 {
+		b.idx = -1
 		return Track{}, false
 	}
-	if p.idx < 0 {
-		p.idx = 0
+	if b.idx < 0 {
+		b.idx = 0
 	} else {
-		p.idx = (p.idx + 1) % len(p.tracks)
+		b.idx = (b.idx + 1) % len(b.tracks)
 	}
-	return p.tracks[p.idx], true
+	return b.tracks[b.idx], true
 }
 
-// force reload on external request (e.g., after upload)
-func (p *playlistState) forceReload() {
-	info, err := os.Stat(p.dir)
-	if err != nil {
-		return
-	}
-	p.reload(info.ModTime())
+func (b *backendPlaylist) forceReload() {
+	b.mu.Lock()
+	b.lastFetch = time.Time{}
+	b.mu.Unlock()
 }
