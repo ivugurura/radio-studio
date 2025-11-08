@@ -35,8 +35,13 @@ func main() {
 		opts...,
 	)
 
-	manager.RegisterStudio("reformation-rw")
+	s1 := manager.RegisterStudio("reformation-rw")
 	manager.RegisterStudio("reformation-congo")
+
+	//Start analytics sync if configured
+	if cfg.BackendIngestURL != "" {
+		s1.StartAnalytics(cfg.BackendIngestURL, cfg.BackendAPIKey, cfg.EventFlushInterval)
+	}
 
 	http.HandleFunc("/studio/", manager.RouteStudioRequest)
 
