@@ -46,7 +46,7 @@ func (c *Client) SendBatch(ctx context.Context, batch IngestBatch) error {
 		return err
 	}
 	defer res.Body.Close()
-	if res.StatusCode < 200 || res.StatusCode > 300 {
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		return fmt.Errorf("ingest failed: status=%d", res.StatusCode)
 	}
 	return nil
