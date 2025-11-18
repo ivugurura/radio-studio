@@ -38,7 +38,7 @@ func main() {
 	s1 := manager.RegisterStudio("reformation-rw")
 	manager.RegisterStudio("reformation-congo")
 
-	//Start analytics sync if configured
+	// Start analytics sync if configured
 	if cfg.BackendAPI != "" {
 		backendIngestURL := cfg.BackendAPI + "/studios/" + s1.ID + "/listener-events"
 		s1.StartAnalytics(backendIngestURL, cfg.BackendAPIKey, cfg.EventFlushInterval)
