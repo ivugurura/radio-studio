@@ -117,7 +117,7 @@ func (b *bucketState) accrueListenerMinutes(delta time.Duration, active int) {
 	}
 }
 
-// StartAnalytics launches a goroutine that periodically flishes listener sessions and buckets to the backend
+// StartAnalytics launches a goroutine that periodically flushes listener sessions and buckets to the backend
 func (s *Studio) StartAnalytics(ingestURL, apiKey string, flushEvery time.Duration) (stop chan struct{}) {
 	if ingestURL == "" || flushEvery <= 0 {
 		return nil
