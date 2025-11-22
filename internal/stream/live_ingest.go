@@ -22,7 +22,14 @@ type LiveMeta struct {
 }
 
 // Configure per studio if you want different passwords later
-var liveSourcePassword = "Test123" // load from config / env
+var liveSourcePassword = "Test123" // TODO: load from config / env
+
+// Tunables for handling fragile encoders that briefly close right after connect
+var (
+	liveEarlyEOFGrace     = 5 * time.Second // total window after connect to tolerate early EOFs
+	liveEarlyEOFMaxRetrys = 5               // how many consecutive early EOFs to allow in grace window
+	liveEarlyEOFSleep     = 200 * time.Millisecond
+)
 
 // BasicAuth check for Icecast-like request
 func checkIcecastAuth(r *http.Request) error {
@@ -54,14 +61,17 @@ func checkIcecastAuth(r *http.Request) error {
 
 func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Server", "Icecast 2.4.0")
-	// w.WriteHeader(http.StatusOK)
-	// Accept PUT or SOURCE (Icecast) or POST (some tools)
+	// Accept PUT, POST (ffmpeg etc.) or SOURCE (Icecast encoders like BUTT)
 	if r.Method != http.MethodPut && r.Method != http.MethodPost && r.Method != "SOURCE" {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	log.Printf("[live %s] incoming method=%s remote=%s", s.ID, r.Method, r.RemoteAddr)
+	log.Printf("[live %s] incoming method=%s remote=%s contentLength=%d", s.ID, r.Method, r.RemoteAddr, r.ContentLength)
+	// Debug: dump headers (could gate behind env flag later)
+	for k, v := range r.Header {
+		log.Printf("[live %s] hdr %s=%q", s.ID, k, strings.Join(v, ", "))
+	}
 
 	// Auth
 	if err := checkIcecastAuth(r); err != nil {
@@ -81,40 +91,105 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 	meta := extractLiveMeta(r)
 	s.setLiveMeta(meta)
 
+	var reader io.ReadCloser
+	var hijackedConn io.Closer
+
+	// Some clients send Expect: 100-continue before sending body on PUT/POST
+	if r.Method != "SOURCE" && strings.EqualFold(r.Header.Get("Expect"), "100-continue") {
+		w.WriteHeader(http.StatusContinue)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		log.Printf("[live %s] sent 100-continue for %s", s.ID, r.Method)
+	}
+
+	// Decide whether to hijack: always for SOURCE; for PUT/POST if unknown/zero Content-Length to keep raw socket
+	if r.Method == "SOURCE" || ((r.Method == http.MethodPut || r.Method == http.MethodPost) && r.ContentLength <= 0) {
+		// Some Icecast source clients (e.g. BUTT) use custom METHOD SOURCE and may not set
+		// a Content-Length or transfer encoding. Hijack raw connection to read bytes directly.
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			http.Error(w, "hijack not supported", http.StatusInternalServerError)
+			return
+		}
+		conn, bufRW, err := hj.Hijack()
+		if err != nil {
+			log.Printf("[live %s] hijack failed: %v", s.ID, err)
+			return
+		}
+		// Send minimal Icecast-like response
+		_, _ = bufRW.WriteString("HTTP/1.0 200 OK\r\nServer: Icecast 2.4.0\r\n\r\n")
+		_ = bufRW.Flush()
+		reader = conn
+		hijackedConn = conn
+	} else {
+		// Regular HTTP methods (PUT/POST) streaming body
+		log.Println("=======>Excuted")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		reader = r.Body
+	}
+
 	// Mark active
 	s.liveMu.Lock()
-	s.liveIngest = r.Body
+	s.liveIngest = reader
 	s.liveActive.Store(true)
 	s.liveMu.Unlock()
 
-	log.Printf("[live %s] connected: name=%q bitrate=%s", s.ID, meta.Name, meta.Bitrate)
-
-	// Respond OK so BUTT shows “connected”
-	w.WriteHeader(http.StatusOK)
-	if f, ok := w.(http.Flusher); ok {
-		f.Flush()
-	}
+	log.Printf("[live %s] connected: method=%s name=%q bitrate=%s", s.ID, r.Method, meta.Name, meta.Bitrate)
 
 	buf := make([]byte, 8192)
 	graceStart := time.Now()
 	earlyEOFs := 0
+	bytesReceived := 0
+	receivedAudio := false
+	isPutLike := r.Method == http.MethodPut || r.Method == http.MethodPost
 	for {
-		n, err := s.liveIngest.Read(buf)
+		n, err := reader.Read(buf)
 		if n > 0 {
 			chunk := make([]byte, n)
 			copy(chunk, buf[:n])
 			s.push(chunk)
+			bytesReceived += n
+			if !receivedAudio {
+				receivedAudio = true
+				log.Printf("[live %s] first audio after %s (bytes=%d)", s.ID, time.Since(graceStart).Round(time.Millisecond), bytesReceived)
+			}
+			if earlyEOFs > 0 {
+				earlyEOFs = 0
+			}
 		}
 		if err != nil {
-			if errors.Is(err, io.EOF) && n == 0 && time.Since(graceStart) < 1500*time.Millisecond && earlyEOFs < 2 {
-				earlyEOFs++
-				log.Printf("[live %s] early EOF (attempt %d) - retrying brief grace", s.ID, earlyEOFs)
-				time.Sleep(150 * time.Millisecond)
-				continue
+			if (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) && n == 0 && !receivedAudio {
+				// Time based grace only (ignore retry cap) until maxGrace exceeded
+				graceElapsed := time.Since(graceStart)
+				maxGrace := liveEarlyEOFGrace
+				if isPutLike {
+					maxGrace = liveEarlyEOFGrace + 10*time.Second
+				}
+				if graceElapsed < maxGrace {
+					earlyEOFs++
+					if earlyEOFs%5 == 0 { // log every 5th attempt to reduce noise
+						log.Printf("[live %s] waiting for first audio (EOF attempts=%d elapsed=%s grace=%s method=%s)", s.ID, earlyEOFs, graceElapsed.Round(time.Millisecond), maxGrace, r.Method)
+					}
+					time.Sleep(liveEarlyEOFSleep)
+					continue
+				}
 			}
-			log.Printf("[live %s] READ end n=%d err=%v", s.ID, n, err)
+			// If we reached here: either audio received then read ended, or grace expired without audio
+			if !receivedAudio {
+				log.Printf("[live %s] terminating: no audio within grace (elapsed=%s attempts=%d method=%s)", s.ID, time.Since(graceStart).Round(time.Millisecond), earlyEOFs, r.Method)
+			} else {
+				log.Printf("[live %s] READ end n=%d err=%v (totalBytes=%d)", s.ID, n, err, bytesReceived)
+			}
 			break
 		}
+	}
+
+	if hijackedConn != nil {
+		_ = hijackedConn.Close()
 	}
 
 	s.liveMu.Lock()
