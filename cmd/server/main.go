@@ -24,8 +24,8 @@ func main() {
 	// If playlist URL is configured, use backend-driven AutoDJ
 	if cfg.BackendAPI != "" {
 		opts = append(opts, stream.WithAutoDJFactory(func(dir string, studioID string, bitrate int, push func([]byte)) stream.AutoDJ {
-			backendPlaylistURL := cfg.BackendAPI + "/studios/" + studioID + "/playlist"
-			return stream.NewAutoDJ(dir, studioID, bitrate, push, backendPlaylistURL, cfg.BackendAPIKey, cfg.DefaultTrackFile)
+			studioEndpoint := cfg.BackendAPI + "/studios/" + studioID
+			return stream.NewAutoDJ(dir, studioID, bitrate, push, studioEndpoint, cfg.BackendAPIKey, cfg.DefaultTrackFile)
 		}))
 	}
 

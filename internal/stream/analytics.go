@@ -148,14 +148,14 @@ func (s *Studio) StartAnalytics(ingestURL, apiKey string, flushEvery time.Durati
 			last = now
 
 			// Build batch
-			batch := analytics.IngestBatch{
+			batch := analytics.IngestListenerBatch{
 				StudioID: s.ID,
 				Sessions: sessions,
 				Buckets:  bk.drainReady(now.Add(-1 * time.Second)),
 			}
 
 			// send but don't block streaming on errors
-			_ = client.SendBatch(context.Background(), batch)
+			_ = client.SendListenerBatch(context.Background(), batch)
 		}
 	}()
 

@@ -25,8 +25,17 @@ type ListenerBucket struct {
 	Countries       map[string]int `json:"countries"`
 }
 
-type IngestBatch struct {
+type IngestListenerBatch struct {
 	StudioID string            `json:"studio_id"`
 	Sessions []ListenerSession `json:"sessions"`
 	Buckets  []ListenerBucket  `json:"buckets"`
+}
+
+type IngestPlayBatch struct {
+	Type      string `json:"type"`
+	TrackID   string `json:"track_id,omitempty"`
+	File      string `json:"file,omitempty"`
+	Source    string `json:"source,omitempty"`
+	StartedAt string `json:"started_at,omitempty"`
+	EndedAt   string `json:"ended_at,omitempty"`
 }
