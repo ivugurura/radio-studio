@@ -202,6 +202,10 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 	s.liveMu.Unlock()
 
 	log.Printf("[live %s] ended", s.ID)
+	// Log AutoDJ resume after live suppression ends (if AutoDJ configured)
+	if s.autoDJ != nil {
+		log.Printf("[live %s] AutoDJ resumed", s.ID)
+	}
 }
 
 // Live metadata helpers
