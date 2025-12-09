@@ -199,6 +199,12 @@ func (s *Studio) switcherLoop() {
 			
 		case autodjChunk = <-s.autodjFeed:
 			// AutoDJ data available
+			// Reset live frame flag if live is no longer active
+			if liveFrameReceived && !s.liveActive.Load() {
+				log.Printf("Studio %s: live stream ended, resuming AutoDJ", s.ID)
+				liveFrameReceived = false
+			}
+			
 			// Forward to feed if either:
 			// 1. Live is not active, OR
 			// 2. Live is marked active but we haven't received the first frame yet
@@ -215,15 +221,6 @@ func (s *Studio) switcherLoop() {
 			}
 			// Always forward live data when available
 			s.push(liveChunk)
-			
-			// Check if live has disconnected while we were processing
-			// If liveActive is false, reset state immediately
-			if !s.liveActive.Load() {
-				if liveFrameReceived {
-					log.Printf("Studio %s: live stream ended, resuming AutoDJ", s.ID)
-					liveFrameReceived = false
-				}
-			}
 		}
 	}
 }
