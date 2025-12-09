@@ -25,11 +25,12 @@ func NewClient(url, apiKey string) *Client {
 	}
 }
 
-func (c *Client) SendBatch(ctx context.Context, batch IngestBatch) error {
+// sendJSON posts a JSON payload to the client's URL with auth/header handling.
+func (c *Client) sendJSON(ctx context.Context, payload interface{}) error {
 	if c.URL == "" {
 		return nil
 	}
-	body, err := json.Marshal(batch)
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
@@ -50,4 +51,12 @@ func (c *Client) SendBatch(ctx context.Context, batch IngestBatch) error {
 		return fmt.Errorf("ingest failed: status=%d", res.StatusCode)
 	}
 	return nil
+}
+
+func (c *Client) SendListenerBatch(ctx context.Context, batch IngestListenerBatch) error {
+	return c.sendJSON(ctx, batch)
+}
+
+func (c *Client) SendPlayerBatch(ctx context.Context, events []IngestPlayBatch) error {
+	return c.sendJSON(ctx, events)
 }

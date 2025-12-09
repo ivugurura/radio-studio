@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/ivugurura/radio-studio/internal/analytics"
 )
 
 // control commands
@@ -47,6 +49,8 @@ type autoDJ struct {
 	activeFile string // internal guard to ensure skip t
 
 	fallbackPath string
+
+	client *analytics.Client
 }
 
 func (a *autoDJ) lock() {
@@ -88,7 +92,9 @@ func (a *autoDJ) NowPlaying() (Track, Track, time.Time, bool) {
 }
 
 // NewAutoDJWithBackend selects backend-driven playlist if endpoint provided; falls back to filesystem otherwise.
-func NewAutoDJ(audioDir string, studioID string, bitrateKbps int, push func([]byte), playlistEndpoint string, apiKey string, fallbackFile string) AutoDJ {
+func NewAutoDJ(audioDir string, studioID string, bitrateKbps int, push func([]byte), studioEndpoint string, apiKey string, fallbackFile string) AutoDJ {
+	playlistEndpoint := studioEndpoint + "/playlist"
+	ingestEndpoint := studioEndpoint + "/play-events"
 	return &autoDJ{
 		dir:          audioDir,
 		bitrateKbps:  bitrateKbps,
@@ -97,6 +103,7 @@ func NewAutoDJ(audioDir string, studioID string, bitrateKbps int, push func([]by
 		playlist:     newBackendPlaylist(audioDir, studioID, playlistEndpoint, apiKey),
 		nowMu:        make(chan struct{}, 1),
 		fallbackPath: fallbackFile,
+		client:       analytics.NewClient(ingestEndpoint, apiKey),
 	}
 }
 
@@ -148,6 +155,13 @@ func (a *autoDJ) streamFile(ctx context.Context, path string, bytesPerSec, chunk
 		}
 		if rerr != nil {
 			if rerr == io.EOF {
+				a.client.SendPlayerBatch(ctx, []analytics.IngestPlayBatch{{
+					Type:    "track_ended",
+					TrackID: a.current.ID,
+					File:    a.current.File,
+					Source:  "AUTO",
+					EndedAt: time.Now().UTC().Format(time.RFC3339),
+				}})
 				return nil // normal end
 			}
 			return &TrackError{Path: path, Kind: "read", Err: rerr}
@@ -171,6 +185,15 @@ func (a *autoDJ) tryFallback(ctx context.Context, bytesPerSec, chunkSize int) bo
 	a.next = Track{}
 	a.startedAt = time.Now()
 	a.activeFile = a.fallbackPath
+
+	a.client.SendPlayerBatch(ctx, []analytics.IngestPlayBatch{{
+		Type:      "track_started",
+		TrackID:   a.current.ID,
+		File:      a.current.File,
+		Source:    "AUTO",
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}})
+
 	a.unlock()
 
 	err := a.streamFile(ctx, a.fallbackPath, bytesPerSec, chunkSize)
@@ -219,6 +242,15 @@ func (a *autoDJ) Play(ctx context.Context) {
 		a.next = next
 		a.startedAt = time.Now()
 		a.activeFile = cur.File
+
+		a.client.SendPlayerBatch(ctx, []analytics.IngestPlayBatch{{
+			Type:      "track_started",
+			TrackID:   a.current.ID,
+			File:      a.current.File,
+			Source:    "AUTO",
+			StartedAt: time.Now().UTC().Format(time.RFC3339),
+		}})
+
 		a.unlock()
 
 		log.Printf("AudioDJ: playing %s", cur.Title)
