@@ -24,6 +24,13 @@ type LiveMeta struct {
 // Configure per studio if you want different passwords later
 var liveSourcePassword = "Test123" // TODO: load from config / env
 
+// Recommended encoder settings for seamless switching with AutoDJ:
+// - Codec: MP3
+// - Sample Rate: 44.1kHz
+// - Channels: Stereo
+// - Bitrate: 128kbps CBR (Constant Bitrate)
+// This matches typical AutoDJ pacing and minimizes codec/bitrate mismatches at splice points.
+
 // Tunables for handling fragile encoders that briefly close right after connect
 var (
 	liveEarlyEOFGrace     = 5 * time.Second // total window after connect to tolerate early EOFs
@@ -151,7 +158,12 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 		if n > 0 {
 			chunk := make([]byte, n)
 			copy(chunk, buf[:n])
-			s.push(chunk)
+			// Write to liveFeed instead of directly pushing
+			select {
+			case s.liveFeed <- chunk:
+			default:
+				// Drop if channel is full (rare with adequate buffer)
+			}
 			bytesReceived += n
 			if !receivedAudio {
 				receivedAudio = true
