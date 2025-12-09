@@ -62,6 +62,10 @@ type Studio struct {
 	liveMetaMu sync.RWMutex
 	liveMeta   *LiveMeta
 
+	// Per-source feeds for warm switching
+	autodjFeed chan []byte
+	liveFeed   chan []byte
+
 	// Central feed: all upstream audio goes here (AutoDJ or live)
 	feed chan []byte
 
@@ -86,6 +90,8 @@ func NewStudio(id string, dir string, brKbps int, geoR *geo.Resolver, autoDJF Au
 		ID:               id,
 		audioDir:         dir,
 		bitrateKbps:      brKbps,
+		autodjFeed:       make(chan []byte, 2048),
+		liveFeed:         make(chan []byte, 2048),
 		feed:             make(chan []byte, 4096),
 		listenersStore:   listeners.NewStore(),
 		streamListeners:  make(map[*streamListener]struct{}),
@@ -94,17 +100,21 @@ func NewStudio(id string, dir string, brKbps int, geoR *geo.Resolver, autoDJF Au
 		stop:             make(chan struct{}),
 	}
 
-	// Start distributor + AutoDJ
+	// Start distributor, switcher, and AutoDJ
 	go s.distribute()
+	go s.switcherLoop()
 	if autoDJF != nil {
 		ctx, cancel := context.WithCancel(context.Background())
 		s.autoDJCancel = cancel
 		s.autoDJ = autoDJF(dir, id, brKbps, func(b []byte) {
-			// If you want to suppress AutoDJ during live, check s.liveActive.Load() here
-			if s.liveActive.Load() {
-				return
+			// Always write to autodjFeed; switcher decides what to forward
+			chunk := make([]byte, len(b))
+			copy(chunk, b)
+			select {
+			case s.autodjFeed <- chunk:
+			default:
+				// Drop if channel is full (rare with adequate buffer)
 			}
-			s.push(b)
 		})
 		go s.autoDJ.Play(ctx)
 	}
@@ -167,6 +177,55 @@ func (s *Studio) Close() {
 		s.autoDJCancel()
 	}
 	close(s.feed)
+}
+
+// switcherLoop implements warm switching between AutoDJ and live streams.
+// It ensures seamless transitions by:
+// - Only switching to live after receiving the first live frame (prevents starvation)
+// - Continuing AutoDJ until live frames arrive (prevents silent gaps)
+// - Immediately resuming AutoDJ when live disconnects
+func (s *Studio) switcherLoop() {
+	log.Printf("Studio %s: switcher loop started", s.ID)
+	
+	var liveFrameReceived bool
+	autodjChunk := []byte(nil)
+	liveChunk := []byte(nil)
+	
+	for {
+		select {
+		case <-s.stop:
+			log.Printf("Studio %s: switcher loop stopped", s.ID)
+			return
+			
+		case autodjChunk = <-s.autodjFeed:
+			// AutoDJ data available
+			// Forward to feed if either:
+			// 1. Live is not active, OR
+			// 2. Live is marked active but we haven't received the first frame yet
+			if !s.liveActive.Load() || !liveFrameReceived {
+				s.push(autodjChunk)
+			}
+			// If live is active and we have received frames, drop AutoDJ data
+			
+		case liveChunk = <-s.liveFeed:
+			// Live data received
+			if !liveFrameReceived {
+				liveFrameReceived = true
+				log.Printf("Studio %s: first live frame received, switching to live stream", s.ID)
+			}
+			// Always forward live data when available
+			s.push(liveChunk)
+			
+			// Check if live has disconnected while we were processing
+			// If liveActive is false, reset state immediately
+			if !s.liveActive.Load() {
+				if liveFrameReceived {
+					log.Printf("Studio %s: live stream ended, resuming AutoDJ", s.ID)
+					liveFrameReceived = false
+				}
+			}
+		}
+	}
 }
 
 func (s *Studio) push(data []byte) {
@@ -276,7 +335,12 @@ func (s *Studio) HandleLiveIngestV1(w http.ResponseWriter, r *http.Request) {
 		if n > 0 {
 			chunk := make([]byte, n)
 			copy(chunk, buf[:n])
-			s.push(chunk)
+			// Write to liveFeed instead of directly pushing
+			select {
+			case s.liveFeed <- chunk:
+			default:
+				// Drop if channel is full (rare with adequate buffer)
+			}
 		}
 		if err != nil {
 			break
