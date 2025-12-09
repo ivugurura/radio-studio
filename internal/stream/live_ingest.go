@@ -50,7 +50,7 @@ func checkIcecastAuth(r *http.Request) error {
 		return errors.New("invalid credential format")
 	}
 	user, pass := creds[0], creds[1]
-	if user != "source" {
+	if user != "ubugorozi" {
 		return errors.New("invalid user")
 	}
 	if pass != liveSourcePassword {
