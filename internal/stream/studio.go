@@ -188,8 +188,7 @@ func (s *Studio) switcherLoop() {
 	log.Printf("Studio %s: switcher loop started", s.ID)
 	
 	var liveFrameReceived bool
-	autodjChunk := []byte(nil)
-	liveChunk := []byte(nil)
+	var autodjChunk, liveChunk []byte
 	
 	for {
 		select {
@@ -200,6 +199,8 @@ func (s *Studio) switcherLoop() {
 		case autodjChunk = <-s.autodjFeed:
 			// AutoDJ data available
 			// Reset live frame flag if live is no longer active
+			// Note: Once liveActive becomes false, no new live frames are written to liveFeed,
+			// so any remaining buffered live frames will be processed before this reset occurs.
 			if liveFrameReceived && !s.liveActive.Load() {
 				log.Printf("Studio %s: live stream ended, resuming AutoDJ", s.ID)
 				liveFrameReceived = false
