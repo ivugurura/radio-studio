@@ -78,4 +78,4 @@ jobs:
             go build -o bin/radio-studio ./cmd/server
 
             sudo systemctl restart "$SERVICE_NAME"
-            sudo systemctl is-active --quiet "$SERVICE_NAME"
+            sudo systemctl status "$SERVICE_NAME" --no-pager
