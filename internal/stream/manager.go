@@ -207,6 +207,8 @@ func (m *Manager) RouteStudioRequest(w http.ResponseWriter, r *http.Request) {
 		studio.HandleSkip(w, r)
 	case "now":
 		studio.HandleNowPlaying(w, r)
+	case "health":
+		netutil.ServerResponse(w, 200, "Studio is Up and Running", nil)
 	default:
 		netutil.ServerResponse(w, 404, "Unknown action", nil)
 	}
