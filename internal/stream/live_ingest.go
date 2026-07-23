@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/ivugurura/radio-studio/config"
 )
 
 type LiveMeta struct {
@@ -57,10 +59,11 @@ func checkIcecastAuth(r *http.Request) error {
 		return errors.New("invalid credential format")
 	}
 	user, pass := creds[0], creds[1]
-	if user != "ubugorozi" {
+	cfg := config.LoadConfig()
+	if user != cfg.User {
 		return errors.New("invalid user")
 	}
-	if pass != liveSourcePassword {
+	if pass != cfg.Password {
 		return errors.New("invalid password")
 	}
 	return nil

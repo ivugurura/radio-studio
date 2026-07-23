@@ -27,6 +27,10 @@ type Config struct {
 
 	// Fallback track
 	DefaultTrackFile string
+
+	// Streaming credeentials
+	User     string
+	Password string
 }
 
 func LoadConfig() *Config {
@@ -39,10 +43,10 @@ func LoadConfig() *Config {
 	}
 
 	cfg := &Config{
-		ListenAddr:         get("LISTEN_ADDR", "8000"),
+		ListenAddr:         get("LISTEN_ADDR", "7080"),
 		AudioDir:           get("AUDIO_DIR", ""),
-		GeoIPDBPath:        get("GEOIP_DB_PATH", "./GeoLite2-City.mmdb"),
-		IPHashSalt:         get("IP_HASH_SALT", "change-me"),
+		GeoIPDBPath:        get("GEOIP_DB_PATH", ""),
+		IPHashSalt:         get("IP_HASH_SALT", ""),
 		EnableGeoIp:        get("ENABLE_GEOIP", "1") == "1",
 		BackendIngestURL:   get("BACKEND_INGEST_URL", ""), // e.g. https://api.example.com/internal/listener-events
 		BackendAPIKey:      get("BACKEND_API_KEY", ""),
@@ -51,6 +55,8 @@ func LoadConfig() *Config {
 		SnapshotInterval:   durationEnv("SNAPSHOT_INTERVAL", 5*time.Second),
 		DefaultBitrateKbps: intEnv("DEFAULT_BITRATE_KBPS", 128),
 		DefaultTrackFile:   get("DEFAULT_TRACK_FILE", ""),
+		User:               get("STREAM_USER", ""),
+		Password:           get("STREAM_PASSWORD", ""),
 	}
 
 	return cfg
