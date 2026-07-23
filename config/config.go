@@ -39,7 +39,7 @@ func LoadConfig() *Config {
 	}
 
 	cfg := &Config{
-		ListenAddr:         get("LISTEN_ADDR", ":8000"),
+		ListenAddr:         get("LISTEN_ADDR", "8000"),
 		AudioDir:           get("AUDIO_DIR", ""),
 		GeoIPDBPath:        get("GEOIP_DB_PATH", "./GeoLite2-City.mmdb"),
 		IPHashSalt:         get("IP_HASH_SALT", "change-me"),

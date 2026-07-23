@@ -56,7 +56,7 @@ func main() {
 	}()
 	log.Printf("Streaming server running at %s\n", cfg.ListenAddr)
 
-	if err := http.ListenAndServe(cfg.ListenAddr, nil); err != nil {
+	if err := http.ListenAndServe(":"+cfg.ListenAddr, nil); err != nil {
 		log.Fatal("Server failed ", err)
 	}
 }
