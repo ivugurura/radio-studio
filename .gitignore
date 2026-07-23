@@ -12,7 +12,6 @@ main
 
 # Go build cache
 /go.mod
-/go.sum
 
 # Dependency directories (if not using Go modules)
 vendor/
