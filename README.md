@@ -19,12 +19,12 @@
 2. To start streaming live audio to a studio (from BUTT, etc):
 
    - Point your encoder to:  
-     `http://your-server:8080/studio/studio1/live` (POST/PUT)
+     `http://your-server:7080/studio/studio1/live` (POST/PUT)
 
 3. To listen to a stream:
 
    - Connect your audio player to:  
-     `http://your-server:8080/studio/studio1/listen` (GET)
+     `http://your-server:7080/studio/studio1/listen` (GET)
 
 ## Next Steps
 
