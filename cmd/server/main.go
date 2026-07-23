@@ -44,7 +44,7 @@ func main() {
 		s1.StartAnalytics(backendIngestURL, cfg.BackendAPIKey, cfg.EventFlushInterval)
 	}
 
-	http.HandleFunc("/studio/", manager.RouteStudioRequest)
+	http.HandleFunc("/studios/", manager.RouteStudioRequest)
 
 	// optional monitoring
 	stopMon := make(chan struct{})

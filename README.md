@@ -2,7 +2,7 @@
 
 ## Features
 
-- Multi-studio support: `/studio/{studioID}/live` and `/studio/{studioID}/listen`
+- Multi-studio support: `/studios/{studioID}/live` and `/studios/{studioID}/listen`
 - Live stream ingest endpoint (for use with encoders like BUTT)
 - Listener endpoint (streams live audio to listeners)
 - Modular, ready for further dashboard/API integration
@@ -19,12 +19,12 @@
 2. To start streaming live audio to a studio (from BUTT, etc):
 
    - Point your encoder to:  
-     `http://your-server:7080/studio/studio1/live` (POST/PUT)
+     `http://your-server:7080/studios/studio1/live` (POST/PUT)
 
 3. To listen to a stream:
 
    - Connect your audio player to:  
-     `http://your-server:7080/studio/studio1/listen` (GET)
+     `http://your-server:7080/studios/studio1/listen` (GET)
 
 ## Next Steps
 

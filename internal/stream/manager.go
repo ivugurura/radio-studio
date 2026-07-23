@@ -181,7 +181,7 @@ func (m *Manager) StartMonitor(interval time.Duration, stop <-chan struct{}) {
 // Expected pattern: /studio/{id}/{action}
 // Actions: listen | live (extend as needed: metadata, status, etc.)
 func (m *Manager) RouteStudioRequest(w http.ResponseWriter, r *http.Request) {
-	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/studio/"), "/")
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/studios/"), "/")
 	if len(parts) < 2 {
 		netutil.ServerResponse(w, 400, "Invalid studio endpoint", nil)
 		return
