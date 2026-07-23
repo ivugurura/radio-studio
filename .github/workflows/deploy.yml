@@ -59,8 +59,8 @@ jobs:
           script: |
             set -euo pipefail
 
-            REPO_DIR="${DEPLOY_PATH:-/srv/apps/radio-studio}"
-            BRANCH="${DEPLOY_BRANCH:main}"
+            REPO_DIR="${DEPLOY_PATH:-${{ secrets.APP_DIR }}}"
+            BRANCH="${DEPLOY_BRANCH:-main}"
             SERVICE_NAME="${SERVICE_NAME:-radio-studio}"
 
             if [ ! -d "$REPO_DIR/.git" ]; then
