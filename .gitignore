@@ -4,6 +4,7 @@
 *.so
 *.dylib
 *.test
+main
 
 # Go module cache
 /pkg/
