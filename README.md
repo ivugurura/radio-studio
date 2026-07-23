@@ -6,7 +6,8 @@
 - Live stream ingest endpoint (for use with encoders like BUTT)
 - Listener endpoint (streams live audio to listeners)
 - Modular, ready for further dashboard/API integration
-- No external dependencies (only Go standard library)
+- External modules are tracked in `go.mod` and `go.sum` for reproducible builds
+- GeoIP enrichment is optional and disabled unless configured in `internal/geo`
 
 ## Usage
 
@@ -16,12 +17,14 @@
    go run cmd/server/main.go
    ```
 
-2. To start streaming live audio to a studio (from BUTT, etc):
+2. If you change dependencies, commit both `go.mod` and `go.sum` so CI and deploy builds stay in sync.
+
+3. To start streaming live audio to a studio (from BUTT, etc):
 
    - Point your encoder to:  
      `http://your-server:7080/studios/studio1/live` (POST/PUT)
 
-3. To listen to a stream:
+4. To listen to a stream:
 
    - Connect your audio player to:  
      `http://your-server:7080/studios/studio1/listen` (GET)
