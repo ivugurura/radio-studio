@@ -6,6 +6,7 @@ import (
 
 	"github.com/ivugurura/radio-studio/config"
 	"github.com/ivugurura/radio-studio/internal/geo"
+	"github.com/ivugurura/radio-studio/internal/netutil"
 	"github.com/ivugurura/radio-studio/internal/stream"
 	"github.com/joho/godotenv"
 )
@@ -44,7 +45,7 @@ func main() {
 		s1.StartAnalytics(backendIngestURL, cfg.BackendAPIKey, cfg.EventFlushInterval)
 	}
 
-	http.HandleFunc("/studios/", manager.RouteStudioRequest)
+	http.HandleFunc("/studios/", netutil.WithCORS(manager.RouteStudioRequest, cfg.AllowedOrigins))
 
 	// optional monitoring
 	stopMon := make(chan struct{})

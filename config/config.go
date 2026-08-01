@@ -10,6 +10,9 @@ import (
 type Config struct {
 	ListenAddr string
 	AudioDir   string
+	// Comma-separated list of allowed browser origins for studio endpoints.
+	// Use "*" to allow any origin.
+	AllowedOrigins string
 
 	// Geo analytics
 	GeoIPDBPath string
@@ -45,6 +48,7 @@ func LoadConfig() *Config {
 	cfg := &Config{
 		ListenAddr:         get("LISTEN_ADDR", "7080"),
 		AudioDir:           get("AUDIO_DIR", ""),
+		AllowedOrigins:     get("ALLOWED_ORIGINS", ""),
 		GeoIPDBPath:        get("GEOIP_DB_PATH", ""),
 		IPHashSalt:         get("IP_HASH_SALT", ""),
 		EnableGeoIp:        get("ENABLE_GEOIP", "1") == "1",
