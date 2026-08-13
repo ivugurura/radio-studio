@@ -1,9 +1,12 @@
 package stream
 
 import (
+	"bufio"
 	"encoding/base64"
 	"errors"
+	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -20,6 +23,21 @@ type LiveMeta struct {
 	Public      string
 	RawHeaders  map[string]string
 	UpdatedAt   time.Time
+}
+
+// liveSourceReader consumes the connection-delimited body sent by Icecast
+// encoders using the non-standard HTTP/1.0 SOURCE method.
+type liveSourceReader struct {
+	reader *bufio.Reader
+	conn   net.Conn
+}
+
+func (r *liveSourceReader) Read(p []byte) (int, error) {
+	return r.reader.Read(p)
+}
+
+func (r *liveSourceReader) Close() error {
+	return r.conn.Close()
 }
 
 // Configure per studio if you want different passwords later
@@ -98,37 +116,71 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 	meta := extractLiveMeta(r)
 	s.setLiveMeta(meta)
 
-	// Go's request body works for SOURCE, PUT, and POST, including HTTP/1.0
-	// source streams without a Content-Length. Do not hijack the connection:
-	// a reverse proxy terminates that connection and Go may already have audio
-	// bytes buffered in r.Body.
-	reader := r.Body
-
-	// Some clients send Expect: 100-continue before sending body on PUT/POST.
-	if r.Method != "SOURCE" && strings.EqualFold(r.Header.Get("Expect"), "100-continue") {
-		w.WriteHeader(http.StatusContinue)
+	var reader io.ReadCloser
+	if r.Method == "SOURCE" {
+		// BUTT sends `SOURCE ... HTTP/1.0` without Content-Length or chunked
+		// framing. net/http therefore exposes r.Body as empty. Hijacking retains
+		// its buffered bytes and lets us read the connection-delimited audio.
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			s.liveMu.Lock()
+			s.liveActive.Store(false)
+			s.clearLiveMeta()
+			s.liveMu.Unlock()
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+		conn, readWriter, err := hijacker.Hijack()
+		if err != nil {
+			s.liveMu.Lock()
+			s.liveActive.Store(false)
+			s.clearLiveMeta()
+			s.liveMu.Unlock()
+			log.Printf("[live %s] could not hijack SOURCE connection: %v", s.ID, err)
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+		if _, err := readWriter.WriteString("HTTP/1.0 200 OK\r\nServer: Icecast 2.4.0\r\n\r\n"); err != nil {
+			_ = conn.Close()
+			s.liveMu.Lock()
+			s.liveActive.Store(false)
+			s.clearLiveMeta()
+			s.liveMu.Unlock()
+			log.Printf("[live %s] could not acknowledge SOURCE connection: %v", s.ID, err)
+			return
+		}
+		if err := readWriter.Flush(); err != nil {
+			_ = conn.Close()
+			s.liveMu.Lock()
+			s.liveActive.Store(false)
+			s.clearLiveMeta()
+			s.liveMu.Unlock()
+			log.Printf("[live %s] could not flush SOURCE acknowledgement: %v", s.ID, err)
+			return
+		}
+		reader = &liveSourceReader{reader: readWriter.Reader, conn: conn}
+	} else {
+		reader = r.Body
+		if strings.EqualFold(r.Header.Get("Expect"), "100-continue") {
+			w.WriteHeader(http.StatusContinue)
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			log.Printf("[live %s] sent 100-continue for %s", s.ID, r.Method)
+		}
+		if err := http.NewResponseController(w).EnableFullDuplex(); err != nil {
+			s.liveMu.Lock()
+			s.liveActive.Store(false)
+			s.clearLiveMeta()
+			s.liveMu.Unlock()
+			log.Printf("[live %s] could not enable full duplex: %v", s.ID, err)
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
-		log.Printf("[live %s] sent 100-continue for %s", s.ID, r.Method)
-	}
-
-	// SOURCE streams need the response acknowledged while the request body is
-	// still being uploaded. Without full duplex, net/http may stop accepting
-	// that body after this response is flushed.
-	if err := http.NewResponseController(w).EnableFullDuplex(); err != nil {
-		s.liveMu.Lock()
-		s.liveActive.Store(false)
-		s.clearLiveMeta()
-		s.liveMu.Unlock()
-		log.Printf("[live %s] could not enable full duplex: %v", s.ID, err)
-		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
-		return
-	}
-
-	w.WriteHeader(http.StatusOK)
-	if f, ok := w.(http.Flusher); ok {
-		f.Flush()
 	}
 
 	s.liveMu.Lock()
