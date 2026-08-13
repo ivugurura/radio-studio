@@ -101,21 +101,18 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 	}
 	s.liveActive.Store(true)
 	s.liveMu.Unlock()
-	releaseReservation := func() {
-		s.liveMu.Lock()
-		s.liveActive.Store(false)
-		s.liveMu.Unlock()
-		s.clearLiveMeta()
-	}
 
 	// Capture metadata
 	meta := extractLiveMeta(r)
 	s.setLiveMeta(meta)
 
-	var reader io.ReadCloser
-	var hijackedConn io.Closer
+	// Go's request body works for SOURCE, PUT, and POST, including HTTP/1.0
+	// source streams without a Content-Length. Do not hijack the connection:
+	// a reverse proxy terminates that connection and Go may already have audio
+	// bytes buffered in r.Body.
+	reader := r.Body
 
-	// Some clients send Expect: 100-continue before sending body on PUT/POST
+	// Some clients send Expect: 100-continue before sending body on PUT/POST.
 	if r.Method != "SOURCE" && strings.EqualFold(r.Header.Get("Expect"), "100-continue") {
 		w.WriteHeader(http.StatusContinue)
 		if f, ok := w.(http.Flusher); ok {
@@ -124,35 +121,9 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[live %s] sent 100-continue for %s", s.ID, r.Method)
 	}
 
-	// Decide whether to hijack: always for SOURCE; for PUT/POST if unknown/zero Content-Length to keep raw socket
-	if r.Method == "SOURCE" || ((r.Method == http.MethodPut || r.Method == http.MethodPost) && r.ContentLength <= 0) {
-		// Some Icecast source clients (e.g. BUTT) use custom METHOD SOURCE and may not set
-		// a Content-Length or transfer encoding. Hijack raw connection to read bytes directly.
-		hj, ok := w.(http.Hijacker)
-		if !ok {
-			releaseReservation()
-			http.Error(w, "hijack not supported", http.StatusInternalServerError)
-			return
-		}
-		conn, bufRW, err := hj.Hijack()
-		if err != nil {
-			releaseReservation()
-			log.Printf("[live %s] hijack failed: %v", s.ID, err)
-			return
-		}
-		// Send minimal Icecast-like response
-		_, _ = bufRW.WriteString("HTTP/1.0 200 OK\r\nServer: Icecast 2.4.0\r\n\r\n")
-		_ = bufRW.Flush()
-		reader = conn
-		hijackedConn = conn
-	} else {
-		// Regular HTTP methods (PUT/POST) streaming body
-		log.Println("=======>Excuted")
-		w.WriteHeader(http.StatusOK)
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
-		}
-		reader = r.Body
+	w.WriteHeader(http.StatusOK)
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
 	}
 
 	s.liveMu.Lock()
@@ -213,10 +184,6 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 			}
 			break
 		}
-	}
-
-	if hijackedConn != nil {
-		_ = hijackedConn.Close()
 	}
 
 	s.liveMu.Lock()
