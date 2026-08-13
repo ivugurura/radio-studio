@@ -3,7 +3,7 @@ name: Studio Deploy
 on:
   push:
     branches:
-      - main
+      - develop
   workflow_dispatch:
 
 permissions:
@@ -60,7 +60,7 @@ jobs:
             set -euo pipefail
 
             REPO_DIR="${DEPLOY_PATH:-${{ secrets.APP_DIR }}}"
-            BRANCH="${DEPLOY_BRANCH:-main}"
+            BRANCH="${DEPLOY_BRANCH:-develop}"
             SERVICE_NAME="${SERVICE_NAME:-radio-studio}"
 
             if [ ! -d "$REPO_DIR/.git" ]; then

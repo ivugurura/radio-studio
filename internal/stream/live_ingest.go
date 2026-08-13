@@ -91,10 +91,21 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Reject if one already active
-	if s.liveActive.Load() {
+	// Reserve the source before acknowledging the encoder so concurrent connects
+	// cannot both receive a successful response.
+	s.liveMu.Lock()
+	if s.liveIngest != nil || s.liveActive.Load() {
+		s.liveMu.Unlock()
 		http.Error(w, "live source already active", http.StatusConflict)
 		return
+	}
+	s.liveActive.Store(true)
+	s.liveMu.Unlock()
+	releaseReservation := func() {
+		s.liveMu.Lock()
+		s.liveActive.Store(false)
+		s.liveMu.Unlock()
+		s.clearLiveMeta()
 	}
 
 	// Capture metadata
@@ -119,11 +130,13 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 		// a Content-Length or transfer encoding. Hijack raw connection to read bytes directly.
 		hj, ok := w.(http.Hijacker)
 		if !ok {
+			releaseReservation()
 			http.Error(w, "hijack not supported", http.StatusInternalServerError)
 			return
 		}
 		conn, bufRW, err := hj.Hijack()
 		if err != nil {
+			releaseReservation()
 			log.Printf("[live %s] hijack failed: %v", s.ID, err)
 			return
 		}
@@ -142,15 +155,13 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 		reader = r.Body
 	}
 
-	// Mark active
 	s.liveMu.Lock()
 	s.liveIngest = reader
-	s.liveActive.Store(true)
 	s.liveMu.Unlock()
 
 	log.Printf("[live %s] connected: method=%s name=%q bitrate=%s", s.ID, r.Method, meta.Name, meta.Bitrate)
 
-	buf := make([]byte, 8192)
+	buf := make([]byte, audioChunkSize)
 	graceStart := time.Now()
 	earlyEOFs := 0
 	bytesReceived := 0
@@ -161,11 +172,12 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 		if n > 0 {
 			chunk := make([]byte, n)
 			copy(chunk, buf[:n])
-			// Write to liveFeed instead of directly pushing
+			// Backpressure preserves the MP3 byte stream. Dropping an arbitrary
+			// chunk corrupts the stream until a decoder finds a later frame.
 			select {
 			case s.liveFeed <- chunk:
-			default:
-				// Drop if channel is full (rare with adequate buffer)
+			case <-s.stop:
+				return
 			}
 			bytesReceived += n
 			if !receivedAudio {
@@ -208,12 +220,12 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.liveMu.Lock()
-	if s.liveIngest != nil {
-		_ = s.liveIngest.Close()
+	if s.liveIngest == reader {
+		_ = reader.Close()
 		s.liveIngest = nil
+		s.liveActive.Store(false)
+		s.clearLiveMeta()
 	}
-	s.liveActive.Store(false)
-	s.clearLiveMeta()
 	s.liveMu.Unlock()
 
 	log.Printf("[live %s] ended", s.ID)

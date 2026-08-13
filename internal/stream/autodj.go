@@ -209,7 +209,7 @@ func (a *autoDJ) tryFallback(ctx context.Context, bytesPerSec, chunkSize int) bo
 func (a *autoDJ) Play(ctx context.Context) {
 	// 128 kbps => 16 KB/s
 	bytesPerSec := int(float64(a.bitrateKbps) * 1000.0 / 8.0)
-	chunkSize := 4096
+	chunkSize := audioChunkSize
 
 	for {
 		// Check for stop before scanning playlist.

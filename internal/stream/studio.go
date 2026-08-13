@@ -47,6 +47,18 @@ type streamListener struct {
 	droppedInARow int
 }
 
+const audioChunkSize = 4096
+
+// queueCapacity returns the number of audioChunkSize chunks needed to retain a
+// short amount of audio at the studio's configured bitrate.
+func queueCapacity(bitrateKbps, seconds int) int {
+	if bitrateKbps <= 0 {
+		bitrateKbps = 128
+	}
+	bytes := bitrateKbps * 1000 / 8 * seconds
+	return max(1, (bytes+audioChunkSize-1)/audioChunkSize)
+}
+
 // Studio represents a radio studio/channel
 type Studio struct {
 	ID          string
@@ -90,9 +102,9 @@ func NewStudio(id string, dir string, brKbps int, geoR *geo.Resolver, autoDJF Au
 		ID:               id,
 		audioDir:         dir,
 		bitrateKbps:      brKbps,
-		autodjFeed:       make(chan []byte, 2048),
-		liveFeed:         make(chan []byte, 2048),
-		feed:             make(chan []byte, 4096),
+		autodjFeed:       make(chan []byte, queueCapacity(brKbps, 2)),
+		liveFeed:         make(chan []byte, queueCapacity(brKbps, 2)),
+		feed:             make(chan []byte, queueCapacity(brKbps, 2)),
 		listenersStore:   listeners.NewStore(),
 		streamListeners:  make(map[*streamListener]struct{}),
 		geoResolver:      geoR,
@@ -107,13 +119,12 @@ func NewStudio(id string, dir string, brKbps int, geoR *geo.Resolver, autoDJF Au
 		ctx, cancel := context.WithCancel(context.Background())
 		s.autoDJCancel = cancel
 		s.autoDJ = autoDJF(dir, id, brKbps, func(b []byte) {
-			// Always write to autodjFeed; switcher decides what to forward
+			// Preserve compressed-byte order; a full queue applies backpressure.
 			chunk := make([]byte, len(b))
 			copy(chunk, b)
 			select {
 			case s.autodjFeed <- chunk:
-			default:
-				// Drop if channel is full (rare with adequate buffer)
+			case <-s.stop:
 			}
 		})
 		go s.autoDJ.Play(ctx)
@@ -197,10 +208,6 @@ func (s *Studio) switcherLoop() {
 			return
 
 		case autodjChunk = <-s.autodjFeed:
-			// AutoDJ data available
-			// Reset live frame flag if live is no longer active
-			// Note: Once liveActive becomes false, no new live frames are written to liveFeed,
-			// so any remaining buffered live frames will be processed before this reset occurs.
 			if liveFrameReceived && !s.liveActive.Load() {
 				log.Printf("Studio %s: live stream ended, resuming AutoDJ", s.ID)
 				liveFrameReceived = false
@@ -215,23 +222,24 @@ func (s *Studio) switcherLoop() {
 			// If live is active and we have received frames, drop AutoDJ data
 
 		case liveChunk = <-s.liveFeed:
-			// Live data received
+			// Discard buffered live frames once the session ends; forwarding them
+			// interleaves stale live bytes with AutoDJ bytes and garbles the stream.
+			if !s.liveActive.Load() {
+				continue
+			}
 			if !liveFrameReceived {
 				liveFrameReceived = true
 				log.Printf("Studio %s: first live frame received, switching to live stream", s.ID)
 			}
-			// Always forward live data when available
 			s.push(liveChunk)
 		}
 	}
 }
 
 func (s *Studio) push(data []byte) {
-	// Non-blocking feed send; if full, drop (rare if sized well)
 	select {
 	case s.feed <- data:
-	default:
-		// could log; but dropping at feed level should be exceptional
+	case <-s.stop:
 	}
 }
 
@@ -316,28 +324,28 @@ func (s *Studio) HandleLiveIngestV1(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	reader := r.Body
 	s.liveMu.Lock()
 	if s.liveIngest != nil {
 		s.liveIngest.Close() // Stop any previous live stream
 	}
 
-	s.liveIngest = r.Body
+	s.liveIngest = reader
 	s.liveActive.Store(true)
 	s.liveMu.Unlock()
 
 	log.Printf("Studio %s: live stream started", s.ID)
 
-	buf := make([]byte, 8192)
+	buf := make([]byte, audioChunkSize)
 	for {
-		n, err := s.liveIngest.Read(buf)
+		n, err := reader.Read(buf)
 		if n > 0 {
 			chunk := make([]byte, n)
 			copy(chunk, buf[:n])
-			// Write to liveFeed instead of directly pushing
 			select {
 			case s.liveFeed <- chunk:
-			default:
-				// Drop if channel is full (rare with adequate buffer)
+			case <-s.stop:
+				return
 			}
 		}
 		if err != nil {
@@ -345,11 +353,11 @@ func (s *Studio) HandleLiveIngestV1(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.liveMu.Lock()
-	if s.liveIngest != nil {
-		_ = s.liveIngest.Close()
+	if s.liveIngest == reader {
+		_ = reader.Close()
 		s.liveIngest = nil
+		s.liveActive.Store(false)
 	}
-	s.liveActive.Store(false)
 	s.liveMu.Unlock()
 	log.Printf("Studio %s: live stream ended", s.ID)
 }
@@ -389,7 +397,7 @@ func (s *Studio) HandleListen(w http.ResponseWriter, r *http.Request) {
 
 	sl := &streamListener{
 		l:  l,
-		ch: make(chan []byte, 2048),
+		ch: make(chan []byte, queueCapacity(s.bitrateKbps, 8)),
 	}
 	s.listenersMu.Lock()
 	s.streamListeners[sl] = struct{}{}
