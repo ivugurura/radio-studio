@@ -40,9 +40,6 @@ func (r *liveSourceReader) Close() error {
 	return r.conn.Close()
 }
 
-// Configure per studio if you want different passwords later
-var liveSourcePassword = "Test123" // TODO: load from config / env
-
 // Recommended encoder settings for seamless switching with AutoDJ:
 // - Codec: MP3
 // - Sample Rate: 44.1kHz
@@ -79,6 +76,21 @@ func checkIcecastAuth(r *http.Request) error {
 	return nil
 }
 
+func (s *Studio) clearLiveIngest(reader io.ReadCloser) {
+	s.liveMu.Lock()
+	defer s.liveMu.Unlock()
+
+	if reader != nil && s.liveIngest != reader {
+		return
+	}
+	if reader != nil {
+		_ = reader.Close()
+	}
+	s.liveIngest = nil
+	s.liveActive.Store(false)
+	s.clearLiveMeta()
+}
+
 func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Server", "Icecast 2.4.0")
 	// Accept PUT, POST (ffmpeg etc.) or SOURCE (Icecast encoders like BUTT)
@@ -112,49 +124,43 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 	s.liveActive.Store(true)
 	s.liveMu.Unlock()
 
-	// Capture metadata
+	var reader io.ReadCloser
+	connected := false
+	defer func() {
+		s.clearLiveIngest(reader)
+		if connected {
+			log.Printf("[live %s] ended", s.ID)
+			if s.autoDJ != nil {
+				log.Printf("[live %s] AutoDJ resumed", s.ID)
+			}
+		}
+	}()
+
 	meta := extractLiveMeta(r)
 	s.setLiveMeta(meta)
 
-	var reader io.ReadCloser
 	if r.Method == "SOURCE" {
 		// BUTT sends `SOURCE ... HTTP/1.0` without Content-Length or chunked
 		// framing. net/http therefore exposes r.Body as empty. Hijacking retains
 		// its buffered bytes and lets us read the connection-delimited audio.
 		hijacker, ok := w.(http.Hijacker)
 		if !ok {
-			s.liveMu.Lock()
-			s.liveActive.Store(false)
-			s.clearLiveMeta()
-			s.liveMu.Unlock()
 			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 			return
 		}
 		conn, readWriter, err := hijacker.Hijack()
 		if err != nil {
-			s.liveMu.Lock()
-			s.liveActive.Store(false)
-			s.clearLiveMeta()
-			s.liveMu.Unlock()
 			log.Printf("[live %s] could not hijack SOURCE connection: %v", s.ID, err)
 			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 			return
 		}
 		if _, err := readWriter.WriteString("HTTP/1.0 200 OK\r\nServer: Icecast 2.4.0\r\n\r\n"); err != nil {
 			_ = conn.Close()
-			s.liveMu.Lock()
-			s.liveActive.Store(false)
-			s.clearLiveMeta()
-			s.liveMu.Unlock()
 			log.Printf("[live %s] could not acknowledge SOURCE connection: %v", s.ID, err)
 			return
 		}
 		if err := readWriter.Flush(); err != nil {
 			_ = conn.Close()
-			s.liveMu.Lock()
-			s.liveActive.Store(false)
-			s.clearLiveMeta()
-			s.liveMu.Unlock()
 			log.Printf("[live %s] could not flush SOURCE acknowledgement: %v", s.ID, err)
 			return
 		}
@@ -169,10 +175,6 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 			log.Printf("[live %s] sent 100-continue for %s", s.ID, r.Method)
 		}
 		if err := http.NewResponseController(w).EnableFullDuplex(); err != nil {
-			s.liveMu.Lock()
-			s.liveActive.Store(false)
-			s.clearLiveMeta()
-			s.liveMu.Unlock()
 			log.Printf("[live %s] could not enable full duplex: %v", s.ID, err)
 			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 			return
@@ -186,6 +188,7 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 	s.liveMu.Lock()
 	s.liveIngest = reader
 	s.liveMu.Unlock()
+	connected = true
 
 	log.Printf("[live %s] connected: method=%s name=%q bitrate=%s", s.ID, r.Method, meta.Name, meta.Bitrate)
 
@@ -197,8 +200,6 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 		if n > 0 {
 			chunk := make([]byte, n)
 			copy(chunk, buf[:n])
-			// Backpressure preserves the MP3 byte stream. Dropping an arbitrary
-			// chunk corrupts the stream until a decoder finds a later frame.
 			select {
 			case s.liveFeed <- chunk:
 			case <-s.stop:
@@ -218,21 +219,6 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 			}
 			break
 		}
-	}
-
-	s.liveMu.Lock()
-	if s.liveIngest == reader {
-		_ = reader.Close()
-		s.liveIngest = nil
-		s.liveActive.Store(false)
-		s.clearLiveMeta()
-	}
-	s.liveMu.Unlock()
-
-	log.Printf("[live %s] ended", s.ID)
-	// Log AutoDJ resume after live suppression ends (if AutoDJ configured)
-	if s.autoDJ != nil {
-		log.Printf("[live %s] AutoDJ resumed", s.ID)
 	}
 }
 
