@@ -3,7 +3,6 @@ package stream
 import (
 	"encoding/base64"
 	"errors"
-	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -32,13 +31,6 @@ var liveSourcePassword = "Test123" // TODO: load from config / env
 // - Channels: Stereo
 // - Bitrate: 128kbps CBR (Constant Bitrate)
 // This matches typical AutoDJ pacing and minimizes codec/bitrate mismatches at splice points.
-
-// Tunables for handling fragile encoders that briefly close right after connect
-var (
-	liveEarlyEOFGrace     = 5 * time.Second // total window after connect to tolerate early EOFs
-	liveEarlyEOFMaxRetrys = 5               // how many consecutive early EOFs to allow in grace window
-	liveEarlyEOFSleep     = 200 * time.Millisecond
-)
 
 // BasicAuth check for Icecast-like request
 func checkIcecastAuth(r *http.Request) error {
@@ -121,6 +113,19 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[live %s] sent 100-continue for %s", s.ID, r.Method)
 	}
 
+	// SOURCE streams need the response acknowledged while the request body is
+	// still being uploaded. Without full duplex, net/http may stop accepting
+	// that body after this response is flushed.
+	if err := http.NewResponseController(w).EnableFullDuplex(); err != nil {
+		s.liveMu.Lock()
+		s.liveActive.Store(false)
+		s.clearLiveMeta()
+		s.liveMu.Unlock()
+		log.Printf("[live %s] could not enable full duplex: %v", s.ID, err)
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
 	w.WriteHeader(http.StatusOK)
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
@@ -133,11 +138,8 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[live %s] connected: method=%s name=%q bitrate=%s", s.ID, r.Method, meta.Name, meta.Bitrate)
 
 	buf := make([]byte, audioChunkSize)
-	graceStart := time.Now()
-	earlyEOFs := 0
 	bytesReceived := 0
 	receivedAudio := false
-	isPutLike := r.Method == http.MethodPut || r.Method == http.MethodPost
 	for {
 		n, err := reader.Read(buf)
 		if n > 0 {
@@ -153,32 +155,12 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 			bytesReceived += n
 			if !receivedAudio {
 				receivedAudio = true
-				log.Printf("[live %s] first audio after %s (bytes=%d)", s.ID, time.Since(graceStart).Round(time.Millisecond), bytesReceived)
-			}
-			if earlyEOFs > 0 {
-				earlyEOFs = 0
+				log.Printf("[live %s] first audio received (bytes=%d)", s.ID, bytesReceived)
 			}
 		}
 		if err != nil {
-			if (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) && n == 0 && !receivedAudio {
-				// Time based grace only (ignore retry cap) until maxGrace exceeded
-				graceElapsed := time.Since(graceStart)
-				maxGrace := liveEarlyEOFGrace
-				if isPutLike {
-					maxGrace = liveEarlyEOFGrace + 10*time.Second
-				}
-				if graceElapsed < maxGrace {
-					earlyEOFs++
-					if earlyEOFs%5 == 0 { // log every 5th attempt to reduce noise
-						log.Printf("[live %s] waiting for first audio (EOF attempts=%d elapsed=%s grace=%s method=%s)", s.ID, earlyEOFs, graceElapsed.Round(time.Millisecond), maxGrace, r.Method)
-					}
-					time.Sleep(liveEarlyEOFSleep)
-					continue
-				}
-			}
-			// If we reached here: either audio received then read ended, or grace expired without audio
 			if !receivedAudio {
-				log.Printf("[live %s] terminating: no audio within grace (elapsed=%s attempts=%d method=%s)", s.ID, time.Since(graceStart).Round(time.Millisecond), earlyEOFs, r.Method)
+				log.Printf("[live %s] ended before receiving audio: %v", s.ID, err)
 			} else {
 				log.Printf("[live %s] READ end n=%d err=%v (totalBytes=%d)", s.ID, n, err, bytesReceived)
 			}
