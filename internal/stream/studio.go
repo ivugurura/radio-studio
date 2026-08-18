@@ -45,6 +45,11 @@ type streamListener struct {
 	l             *listeners.Listener
 	ch            chan []byte
 	droppedInARow int
+	closeOnce     sync.Once
+}
+
+func (sl *streamListener) closeCh() {
+	sl.closeOnce.Do(func() { close(sl.ch) })
 }
 
 const audioChunkSize = 4096
@@ -225,6 +230,7 @@ func (s *Studio) switcherLoop() {
 			// Discard buffered live frames once the session ends; forwarding them
 			// interleaves stale live bytes with AutoDJ bytes and garbles the stream.
 			if !s.liveActive.Load() {
+				liveFrameReceived = false // reset so next session gets a clean warm-switch
 				continue
 			}
 			if !liveFrameReceived {
@@ -295,7 +301,7 @@ func (s *Studio) distribute() {
 			default:
 				ls.droppedInARow++
 				if ls.droppedInARow > 50 {
-					close(ls.ch)
+					ls.closeCh()
 					s.listenersMu.RUnlock()
 					s.removeListener(ls)
 					s.listenersMu.RLock()
@@ -411,7 +417,7 @@ func (s *Studio) HandleListen(w http.ResponseWriter, r *http.Request) {
 		delete(s.streamListeners, sl)
 		s.listenersMu.Unlock()
 		s.listenersStore.Remove(l.ID)
-		close(sl.ch)
+		sl.closeCh()
 		log.Printf("Studio %s: listener disconnected", s.ID)
 	}()
 

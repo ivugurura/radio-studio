@@ -80,7 +80,9 @@ func (s *Studio) clearLiveIngest(reader io.ReadCloser) {
 	s.liveMu.Lock()
 	defer s.liveMu.Unlock()
 
-	if reader != nil && s.liveIngest != reader {
+	// Only skip clearing if an active (non-nil) liveIngest belongs to a different session.
+	// When liveIngest is nil (setup failed before it was assigned), always clear.
+	if reader != nil && s.liveIngest != nil && s.liveIngest != reader {
 		return
 	}
 	if reader != nil {
