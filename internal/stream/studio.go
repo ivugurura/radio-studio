@@ -370,18 +370,19 @@ func (s *Studio) HandleLiveIngestV1(w http.ResponseWriter, r *http.Request) {
 
 // HandleListen streams audio (live or AutoDJ) to a listener.
 func (s *Studio) HandleListen(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "audio/mpeg")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Accept-Ranges", "bytes")
-	// Do NOT manually set Transfer-Encoding; Go will add chunked automatically.
-	w.WriteHeader(http.StatusOK)
-
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
 		return
 	}
+
+	w.Header().Set("Content-Type", "audio/mpeg")
+	w.Header().Set("Cache-Control", "no-cache, no-store")
+	w.Header().Set("Connection", "keep-alive")
+	// Do NOT set Accept-Ranges: an infinite stream is not seekable.
+	// Do NOT manually set Transfer-Encoding; Go will add chunked automatically.
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush() // send headers immediately so the client doesn't stall on initial connect
 
 	id := uuid.NewString()
 	ip := netutil.ExtractClientIp(r)
