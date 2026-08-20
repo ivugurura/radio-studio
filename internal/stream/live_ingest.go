@@ -4,10 +4,12 @@ import (
 	"bufio"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -42,12 +44,8 @@ func (r *liveSourceReader) Close() error {
 	return r.conn.Close()
 }
 
-// Recommended encoder settings for seamless switching with AutoDJ:
-// - Codec: MP3
-// - Sample Rate: 44.1kHz
-// - Channels: Stereo
-// - Bitrate: 128kbps CBR (Constant Bitrate)
-// This matches typical AutoDJ pacing and minimizes codec/bitrate mismatches at splice points.
+// Recommended encoder settings for seamless switching with AutoDJ: MP3,
+// 48kHz, stereo, 128kbps CBR — must match the library (see DEFAULT_SR_HZ).
 
 // BasicAuth check for Icecast-like request
 func checkIcecastAuth(r *http.Request) error {
@@ -142,6 +140,25 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 
 	meta := extractLiveMeta(r)
 	s.setLiveMeta(meta)
+	logFormatCheck(s.ID, s.bitrateKbps, s.srHz, s.ch, meta)
+
+	// Reject a mismatched encoder outright: a format mismatch breaks playback
+	// for listeners at the AutoDJ/live splice point (VLC and browsers alike).
+	if err := validateLiveBitrate(meta.Bitrate, s.bitrateKbps); err != nil {
+		log.Printf("[live %s] rejected: %v", s.ID, err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := validateLiveSampleRate(meta.SampleRate, s.srHz); err != nil {
+		log.Printf("[live %s] rejected: %v", s.ID, err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := validateLiveChannels(meta.Channels, s.ch); err != nil {
+		log.Printf("[live %s] rejected: %v", s.ID, err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	if r.Method == "SOURCE" {
 		// BUTT sends `SOURCE ... HTTP/1.0` without Content-Length or chunked
@@ -194,7 +211,7 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 	s.liveMu.Unlock()
 	connected = true
 
-	log.Printf("[live %s] connected: method=%s name=%q bitrate=%s", s.ID, r.Method, meta.Name, meta.Bitrate)
+	log.Printf("[live %s] connected: method=%s name=%q bitrate=%s samplerate=%s channels=%s", s.ID, r.Method, meta.Name, meta.Bitrate, meta.SampleRate, meta.Channels)
 
 	buf := make([]byte, audioChunkSize)
 	bytesReceived := 0
@@ -226,20 +243,32 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// parseIceAudioInfo parses Ice-Audio-Info's "key=value;..." pairs, stripping
+// an optional "ice-" key prefix (some encoders send "ice-bitrate", not "bitrate").
+func parseIceAudioInfo(raw string) map[string]string {
+	out := make(map[string]string)
+	for _, part := range strings.Split(raw, ";") {
+		kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
+		if len(kv) != 2 || kv[0] == "" {
+			continue
+		}
+		key := strings.TrimPrefix(strings.ToLower(kv[0]), "ice-")
+		out[key] = kv[1]
+	}
+	return out
+}
+
 // Live metadata helpers
 func extractLiveMeta(r *http.Request) LiveMeta {
+	audioInfo := parseIceAudioInfo(r.Header.Get("Ice-Audio-Info"))
+
 	// Resolve bitrate: Ice-Bitrate (BUTT), Icy-Br (ffmpeg), or inside Ice-Audio-Info.
 	bitrate := r.Header.Get("Ice-Bitrate")
 	if bitrate == "" {
 		bitrate = r.Header.Get("Icy-Br")
 	}
 	if bitrate == "" {
-		for _, part := range strings.Split(r.Header.Get("Ice-Audio-Info"), ";") {
-			if kv := strings.SplitN(strings.TrimSpace(part), "=", 2); len(kv) == 2 && kv[0] == "bitrate" {
-				bitrate = kv[1]
-				break
-			}
-		}
+		bitrate = audioInfo["bitrate"]
 	}
 
 	lm := LiveMeta{
@@ -261,4 +290,71 @@ func extractLiveMeta(r *http.Request) LiveMeta {
 		}
 	}
 	return lm
+}
+
+// parseNumericHeader extracts a leading numeric value, tolerating suffixes like "128kb/s".
+func parseNumericHeader(raw string) (int, bool) {
+	digits := strings.TrimFunc(raw, func(r rune) bool { return r < '0' || r > '9' })
+	n, err := strconv.Atoi(digits)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+func matchLabel(got int, ok bool, expected int) string {
+	if !ok {
+		return "unknown"
+	}
+	if got == expected {
+		return "false"
+	}
+	return "true"
+}
+
+// logFormatCheck logs the encoder's declared format against what the studio expects.
+func logFormatCheck(studioID string, expectedKbps, expectedHz, expectedCh int, meta LiveMeta) {
+	receivedKbps, kbpsOK := parseNumericHeader(meta.Bitrate)
+	receivedHz, hzOK := parseNumericHeader(meta.SampleRate)
+	receivedCh, chOK := parseNumericHeader(meta.Channels)
+	log.Printf("[live %s] FORMAT-CHECK expected_bitrate=%dkbps received_bitrate=%q bitrate_mismatch=%s expected_samplerate=%dHz received_samplerate=%q samplerate_mismatch=%s expected_channels=%d received_channels=%q channels_mismatch=%s",
+		studioID, expectedKbps, meta.Bitrate, matchLabel(receivedKbps, kbpsOK, expectedKbps),
+		expectedHz, meta.SampleRate, matchLabel(receivedHz, hzOK, expectedHz),
+		expectedCh, meta.Channels, matchLabel(receivedCh, chOK, expectedCh))
+}
+
+// validateLiveBitrate rejects a connection whose bitrate is missing or doesn't match expectedKbps.
+func validateLiveBitrate(rawBitrate string, expectedKbps int) error {
+	n, ok := parseNumericHeader(rawBitrate)
+	if !ok {
+		return fmt.Errorf("missing or unparseable live bitrate (studio expects %dkbps; encoder must send Ice-Bitrate, Icy-Br, or Ice-Audio-Info)", expectedKbps)
+	}
+	if n != expectedKbps {
+		return fmt.Errorf("live bitrate mismatch: encoder sent %dkbps, studio expects %dkbps", n, expectedKbps)
+	}
+	return nil
+}
+
+// validateLiveSampleRate rejects a connection whose sample rate is missing or doesn't match expectedHz.
+func validateLiveSampleRate(rawSampleRate string, expectedHz int) error {
+	n, ok := parseNumericHeader(rawSampleRate)
+	if !ok {
+		return fmt.Errorf("missing or unparseable live sample rate (studio expects %dHz; encoder must send Ice-Audio-Info with a samplerate field)", expectedHz)
+	}
+	if n != expectedHz {
+		return fmt.Errorf("live sample rate mismatch: encoder sent %dHz, studio expects %dHz", n, expectedHz)
+	}
+	return nil
+}
+
+// validateLiveChannels rejects a connection whose channel count is missing or doesn't match expectedCh.
+func validateLiveChannels(rawChannels string, expectedCh int) error {
+	n, ok := parseNumericHeader(rawChannels)
+	if !ok {
+		return fmt.Errorf("missing or unparseable live channel count (studio expects %d; encoder must send Ice-Audio-Info with a channels field)", expectedCh)
+	}
+	if n != expectedCh {
+		return fmt.Errorf("live channel count mismatch: encoder sent %d, studio expects %d", n, expectedCh)
+	}
+	return nil
 }
