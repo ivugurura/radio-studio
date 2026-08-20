@@ -226,18 +226,33 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 
 // Live metadata helpers
 func extractLiveMeta(r *http.Request) LiveMeta {
+	// Resolve bitrate: Ice-Bitrate (BUTT), Icy-Br (ffmpeg), or inside Ice-Audio-Info.
+	bitrate := r.Header.Get("Ice-Bitrate")
+	if bitrate == "" {
+		bitrate = r.Header.Get("Icy-Br")
+	}
+	if bitrate == "" {
+		for _, part := range strings.Split(r.Header.Get("Ice-Audio-Info"), ";") {
+			if kv := strings.SplitN(strings.TrimSpace(part), "=", 2); len(kv) == 2 && kv[0] == "bitrate" {
+				bitrate = kv[1]
+				break
+			}
+		}
+	}
+
 	lm := LiveMeta{
 		Name:        r.Header.Get("Ice-Name"),
 		Genre:       r.Header.Get("Ice-Genre"),
 		Description: r.Header.Get("Ice-Description"),
 		URL:         r.Header.Get("Ice-URL"),
-		Bitrate:     r.Header.Get("Ice-Bitrate"),
+		Bitrate:     bitrate,
 		Public:      r.Header.Get("Ice-Public"),
 		RawHeaders:  map[string]string{},
 		UpdatedAt:   time.Now().UTC(),
 	}
 	for k, v := range r.Header {
-		if strings.HasPrefix(strings.ToLower(k), "ice-") {
+		kl := strings.ToLower(k)
+		if strings.HasPrefix(kl, "ice-") || strings.HasPrefix(kl, "icy-") {
 			lm.RawHeaders[k] = strings.Join(v, ", ")
 		}
 	}
