@@ -69,6 +69,8 @@ type Studio struct {
 	ID          string
 	audioDir    string
 	bitrateKbps int
+	srHz        int
+	ch          int
 
 	// Live ingest (if present)
 	liveMu     sync.RWMutex
@@ -102,11 +104,13 @@ type Studio struct {
 	autoDJCancel context.CancelFunc
 }
 
-func NewStudio(id string, dir string, brKbps int, geoR *geo.Resolver, autoDJF AutoDJFactory, snapIn time.Duration) *Studio {
+func NewStudio(id string, dir string, brKbps, srHz, ch int, geoR *geo.Resolver, autoDJF AutoDJFactory, snapIn time.Duration) *Studio {
 	s := &Studio{
 		ID:               id,
 		audioDir:         dir,
 		bitrateKbps:      brKbps,
+		srHz:             srHz,
+		ch:               ch,
 		autodjFeed:       make(chan []byte, queueCapacity(brKbps, 2)),
 		liveFeed:         make(chan []byte, queueCapacity(brKbps, 2)),
 		feed:             make(chan []byte, queueCapacity(brKbps, 2)),
@@ -305,7 +309,7 @@ func (s *Studio) distribute() {
 					s.listenersMu.RUnlock()
 					s.removeListener(ls)
 					s.listenersMu.RLock()
-					log.Printf("Studio %s: dropped slow listener", s.ID)
+					log.Printf("Studio %s: dropped slow listener id=%s droppedInARow=%d", s.ID, ls.l.ID, ls.droppedInARow)
 				}
 			}
 			ls.l.ByteSent.Add(int64(len(data)))

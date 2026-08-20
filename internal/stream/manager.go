@@ -17,7 +17,7 @@ import (
 // Useful if later you inject DB handles, metrics, logger, bitrate, etc
 type RequestValidator func(r *http.Request, studioID, action string) error
 
-type StudioFactory func(id, audioDir string, bitrateKbps int, geoR *geo.Resolver, autoDJFactory AutoDJFactory, snapshotInterval time.Duration) *Studio
+type StudioFactory func(id, audioDir string, bitrateKbps, srHz, ch int, geoR *geo.Resolver, autoDJFactory AutoDJFactory, snapshotInterval time.Duration) *Studio
 
 type ManagerOption func(*Manager)
 
@@ -29,8 +29,16 @@ func WithStudioFactory(f StudioFactory) ManagerOption {
 	return func(m *Manager) { m.factory = f }
 }
 
-func WithDefaultBitrate(kbps int) ManagerOption {
-	return func(m *Manager) { m.defaultBitrateKbps = kbps }
+func WithDefaultBr(kbps int) ManagerOption {
+	return func(m *Manager) { m.defaultBrKbps = kbps }
+}
+
+func WithDefaultSr(hz int) ManagerOption {
+	return func(m *Manager) { m.defaultSrHz = hz }
+}
+
+func WithDefaultCh(ch int) ManagerOption {
+	return func(m *Manager) { m.defaultCh = ch }
 }
 
 func WithSnapshotInterval(d time.Duration) ManagerOption {
@@ -48,23 +56,27 @@ type Manager struct {
 	audioBaseDir string
 	geoResolver  *geo.Resolver
 
-	defaultBitrateKbps int
-	snapshotInterval   time.Duration
-	autoDJFactory      AutoDJFactory
+	defaultBrKbps    int
+	defaultSrHz      int
+	defaultCh        int
+	snapshotInterval time.Duration
+	autoDJFactory    AutoDJFactory
 
 	validator RequestValidator
 	factory   StudioFactory
 }
 
 // NewManager create a new Manager
-// defaultBitrateKbps influencesthe AutoDJ pacing logic for all new studio(if you use pacing version)
+// defaultBrKbps influencesthe AutoDJ pacing logic for all new studio(if you use pacing version)
 func NewManager(baseDir string, geoR *geo.Resolver, opts ...ManagerOption) *Manager {
 	m := &Manager{
-		studios:            make(map[string]*Studio),
-		audioBaseDir:       baseDir,
-		defaultBitrateKbps: 128,
-		geoResolver:        geoR,
-		snapshotInterval:   5 * time.Second,
+		studios:          make(map[string]*Studio),
+		audioBaseDir:     baseDir,
+		defaultBrKbps:    128,
+		defaultSrHz:      48000,
+		defaultCh:        2,
+		geoResolver:      geoR,
+		snapshotInterval: 5 * time.Second,
 		// Provide a default AutoDJ factory that works even if no backend playlist is configured.
 		// It passes empty strings so the backend playlist fetch will noop; you can supply a fallback track via ManagerOption later.
 		autoDJFactory: func(dir string, studioID string, bitrate int, push func([]byte)) AutoDJ {
@@ -72,8 +84,8 @@ func NewManager(baseDir string, geoR *geo.Resolver, opts ...ManagerOption) *Mana
 			// To enable a simple filesystem playlist, implement a filesystemPlaylist and wire it here.
 			return NewAutoDJ(dir, studioID, bitrate, push, "", "", "")
 		},
-		factory: func(id, dir string, bitrate int, geoR *geo.Resolver, dj AutoDJFactory, snapInt time.Duration) *Studio {
-			return NewStudio(id, dir, bitrate, geoR, dj, snapInt)
+		factory: func(id, dir string, bitrate, srHz, ch int, geoR *geo.Resolver, dj AutoDJFactory, snapInt time.Duration) *Studio {
+			return NewStudio(id, dir, bitrate, srHz, ch, geoR, dj, snapInt)
 		},
 	}
 
@@ -96,7 +108,7 @@ func (m *Manager) RegisterStudio(studioID string) *Studio {
 		return s
 	}
 	dir := filepath.Join(m.audioBaseDir, studioID)
-	studio := m.factory(studioID, dir, m.defaultBitrateKbps, m.geoResolver, m.autoDJFactory, m.snapshotInterval)
+	studio := m.factory(studioID, dir, m.defaultBrKbps, m.defaultSrHz, m.defaultCh, m.geoResolver, m.autoDJFactory, m.snapshotInterval)
 	studio.ID = studioID
 	m.studios[studioID] = studio
 	log.Printf("Manager: registered studio %s (audioDir=%s)", studioID, dir)

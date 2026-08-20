@@ -18,7 +18,9 @@ func main() {
 	defer geoResolver.Close()
 
 	opts := []stream.ManagerOption{
-		stream.WithDefaultBitrate(cfg.DefaultBitrateKbps),
+		stream.WithDefaultBr(cfg.DefaultBrKbps),
+		stream.WithDefaultSr(cfg.DefaultSrHz),
+		stream.WithDefaultCh(cfg.DefaultCh),
 		stream.WithSnapshotInterval(cfg.SnapshotInterval),
 	}
 

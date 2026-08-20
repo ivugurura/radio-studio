@@ -114,7 +114,9 @@ STREAM_PASSWORD=<encoder-password>
 AUDIO_DIR=<audio-directory>
 BACKEND_API=<backend-api-base-url>
 BACKEND_API_KEY=<studio-api-key>
-DEFAULT_BITRATE_KBPS=128
+DEFAULT_BR_KBPS=128
+DEFAULT_SR_HZ=48000
+DEFAULT_CH=2
 DEFAULT_TRACK_FILE=<fallback-mp3-path>
 ALLOWED_ORIGINS=<comma-separated-browser-origins>
 ```

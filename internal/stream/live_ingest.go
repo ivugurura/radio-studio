@@ -20,6 +20,8 @@ type LiveMeta struct {
 	Description string
 	URL         string
 	Bitrate     string
+	SampleRate  string
+	Channels    string
 	Public      string
 	RawHeaders  map[string]string
 	UpdatedAt   time.Time
@@ -246,6 +248,8 @@ func extractLiveMeta(r *http.Request) LiveMeta {
 		Description: r.Header.Get("Ice-Description"),
 		URL:         r.Header.Get("Ice-URL"),
 		Bitrate:     bitrate,
+		SampleRate:  audioInfo["samplerate"],
+		Channels:    audioInfo["channels"],
 		Public:      r.Header.Get("Ice-Public"),
 		RawHeaders:  map[string]string{},
 		UpdatedAt:   time.Now().UTC(),

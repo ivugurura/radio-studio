@@ -19,7 +19,9 @@ type Config struct {
 	IPHashSalt  string
 	EnableGeoIp bool
 
-	DefaultBitrateKbps int
+	DefaultBrKbps int
+	DefaultSrHz   int
+	DefaultCh     int
 
 	// Backend integration
 	BackendIngestURL   string
@@ -57,7 +59,9 @@ func LoadConfig() *Config {
 		BackendAPI:         get("BACKEND_API", ""),
 		EventFlushInterval: durationEnv("EVENT_FLUSH_INTERVAL", 5*time.Second),
 		SnapshotInterval:   durationEnv("SNAPSHOT_INTERVAL", 5*time.Second),
-		DefaultBitrateKbps: intEnv("DEFAULT_BITRATE_KBPS", 128),
+		DefaultBrKbps:      intEnv("DEFAULT_BR_KBPS", 128),
+		DefaultSrHz:        intEnv("DEFAULT_SR_HZ", 48000),
+		DefaultCh:          intEnv("DEFAULT_CH", 2),
 		DefaultTrackFile:   get("DEFAULT_TRACK_FILE", ""),
 		User:               get("STREAM_USER", ""),
 		Password:           get("STREAM_PASSWORD", ""),
