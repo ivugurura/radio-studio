@@ -72,6 +72,12 @@ type Studio struct {
 	srHz        int
 	ch          int
 
+	// Live-ingest credentials, fetched from the backend (streamingconfig.go)
+	// rather than read from .env.
+	credMu   sync.RWMutex
+	user     string
+	password string
+
 	// Live ingest (if present)
 	liveMu     sync.RWMutex
 	liveIngest io.ReadCloser
@@ -140,6 +146,21 @@ func NewStudio(id string, dir string, brKbps, srHz, ch int, geoR *geo.Resolver, 
 	}
 	go s.snapshotLoop()
 	return s
+}
+
+// SetCredentials updates the live-ingest Basic Auth credentials. Safe to
+// call repeatedly (e.g. from a refresh ticker) while a source is connected.
+func (s *Studio) SetCredentials(user, password string) {
+	s.credMu.Lock()
+	s.user = user
+	s.password = password
+	s.credMu.Unlock()
+}
+
+func (s *Studio) credentials() (string, string) {
+	s.credMu.RLock()
+	defer s.credMu.RUnlock()
+	return s.user, s.password
 }
 
 func (s *Studio) setLiveMeta(m LiveMeta) {

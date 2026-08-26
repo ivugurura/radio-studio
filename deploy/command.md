@@ -109,8 +109,6 @@ The systemd unit should provide these environment variables as needed:
 
 ```text
 LISTEN_ADDR=7081
-STREAM_USER=<encoder-user>
-STREAM_PASSWORD=<encoder-password>
 AUDIO_DIR=<audio-directory>
 BACKEND_API=<backend-api-base-url>
 BACKEND_API_KEY=<studio-api-key>
@@ -120,6 +118,12 @@ DEFAULT_CH=2
 DEFAULT_TRACK_FILE=<fallback-mp3-path>
 ALLOWED_ORIGINS=<comma-separated-browser-origins>
 ```
+
+Live-ingest username/password are no longer env vars — radio-studio fetches
+them from the backend (`GET /api/studios/<studio-id>/streaming-config`,
+`BACKEND_API_KEY` must match the backend's `STUDIO_TOKEN`) on startup and
+every 5 minutes after. Rotate the password from the admin "Streaming Apps"
+page.
 
 Review the effective systemd configuration without printing secret values:
 
