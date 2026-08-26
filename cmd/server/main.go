@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/ivugurura/radio-studio/config"
 	"github.com/ivugurura/radio-studio/internal/geo"
@@ -10,6 +12,37 @@ import (
 	"github.com/ivugurura/radio-studio/internal/stream"
 	"github.com/joho/godotenv"
 )
+
+// streamingConfigRefreshInterval is how often live-ingest credentials are
+// re-fetched, so a password rotated in the admin UI needs no redeploy.
+const streamingConfigRefreshInterval = 5 * time.Minute
+
+// loadStreamingCredentials fetches and applies one studio's credentials,
+// logging rather than failing on error.
+func loadStreamingCredentials(s *stream.Studio, backendAPI, backendAPIKey string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cfg, err := stream.FetchStreamingConfig(ctx, backendAPI, backendAPIKey, s.ID)
+	if err != nil {
+		log.Printf("streaming config: fetch failed for studio %s: %v", s.ID, err)
+		return
+	}
+	s.SetCredentials(cfg.Username, cfg.Password)
+	log.Printf("streaming config: loaded credentials for studio %s (user=%s)", s.ID, cfg.Username)
+}
+
+// startStreamingCredentialRefresh loads credentials immediately, then on
+// streamingConfigRefreshInterval for as long as the process runs.
+func startStreamingCredentialRefresh(s *stream.Studio, backendAPI, backendAPIKey string) {
+	loadStreamingCredentials(s, backendAPI, backendAPIKey)
+	go func() {
+		t := time.NewTicker(streamingConfigRefreshInterval)
+		defer t.Stop()
+		for range t.C {
+			loadStreamingCredentials(s, backendAPI, backendAPIKey)
+		}
+	}()
+}
 
 func main() {
 	_ = godotenv.Load()
@@ -45,6 +78,13 @@ func main() {
 	if cfg.BackendAPI != "" {
 		backendIngestURL := cfg.BackendAPI + "/studios/" + s1.ID + "/listener-events"
 		s1.StartAnalytics(backendIngestURL, cfg.BackendAPIKey, cfg.EventFlushInterval)
+	}
+
+	// Live-ingest credentials come from the backend now, not .env.
+	if cfg.BackendAPI != "" {
+		startStreamingCredentialRefresh(s1, cfg.BackendAPI, cfg.BackendAPIKey)
+	} else {
+		log.Printf("streaming config: BACKEND_API not set; live ingest auth will reject all sources")
 	}
 
 	http.HandleFunc("/studios/", netutil.WithCORS(manager.RouteStudioRequest, cfg.AllowedOrigins))
