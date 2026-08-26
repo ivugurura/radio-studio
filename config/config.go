@@ -32,10 +32,6 @@ type Config struct {
 
 	// Fallback track
 	DefaultTrackFile string
-
-	// Streaming credeentials
-	User     string
-	Password string
 }
 
 func LoadConfig() *Config {
@@ -63,8 +59,6 @@ func LoadConfig() *Config {
 		DefaultSrHz:        intEnv("DEFAULT_SR_HZ", 48000),
 		DefaultCh:          intEnv("DEFAULT_CH", 2),
 		DefaultTrackFile:   get("DEFAULT_TRACK_FILE", ""),
-		User:               get("STREAM_USER", ""),
-		Password:           get("STREAM_PASSWORD", ""),
 	}
 
 	return cfg
