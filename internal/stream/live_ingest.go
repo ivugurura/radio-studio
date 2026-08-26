@@ -12,8 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/ivugurura/radio-studio/config"
 )
 
 type LiveMeta struct {
@@ -47,8 +45,8 @@ func (r *liveSourceReader) Close() error {
 // Recommended encoder settings for seamless switching with AutoDJ: MP3,
 // 48kHz, stereo, 128kbps CBR — must match the library (see DEFAULT_SR_HZ).
 
-// BasicAuth check for Icecast-like request
-func checkIcecastAuth(r *http.Request) error {
+// checkIcecastAuth validates Basic Auth against this studio's current credentials.
+func (s *Studio) checkIcecastAuth(r *http.Request) error {
 	auth := r.Header.Get("Authorization")
 	if auth == "" {
 		return errors.New("missing auth")
@@ -66,11 +64,14 @@ func checkIcecastAuth(r *http.Request) error {
 		return errors.New("invalid credential format")
 	}
 	user, pass := creds[0], creds[1]
-	cfg := config.LoadConfig()
-	if user != cfg.User {
+	expectedUser, expectedPass := s.credentials()
+	if expectedUser == "" || expectedPass == "" {
+		return errors.New("studio credentials not yet loaded")
+	}
+	if user != expectedUser {
 		return errors.New("invalid user")
 	}
-	if pass != cfg.Password {
+	if pass != expectedPass {
 		return errors.New("invalid password")
 	}
 	return nil
@@ -108,7 +109,7 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Auth
-	if err := checkIcecastAuth(r); err != nil {
+	if err := s.checkIcecastAuth(r); err != nil {
 		log.Printf("[live %s] auth failed: %v", s.ID, err)
 		w.Header().Set("WWW-Authenticate", `Basic realm="source"`)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
