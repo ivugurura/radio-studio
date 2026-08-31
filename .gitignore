@@ -29,6 +29,7 @@ Thumbs.db
 
 # Log files
 *.log
+*.csv
 
 # Test cache
 /test/
