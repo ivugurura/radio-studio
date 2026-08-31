@@ -4,7 +4,15 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"os"
 	"time"
+
+	// Registered on http.DefaultServeMux by their init funcs (expvar ->
+	// /debug/vars with memstats, pprof -> /debug/pprof/*). The public server
+	// below uses its own mux, so these are only reachable through the
+	// localhost-only debug listener started when ENABLE_PPROF is set.
+	_ "expvar"
+	_ "net/http/pprof"
 
 	"github.com/ivugurura/radio-studio/config"
 	"github.com/ivugurura/radio-studio/internal/geo"
@@ -87,7 +95,8 @@ func main() {
 		log.Printf("streaming config: BACKEND_API not set; live ingest auth will reject all sources")
 	}
 
-	http.HandleFunc("/studios/", netutil.WithCORS(manager.RouteStudioRequest, cfg.AllowedOrigins))
+	mux := http.NewServeMux()
+	mux.HandleFunc("/studios/", netutil.WithCORS(manager.RouteStudioRequest, cfg.AllowedOrigins))
 
 	// optional monitoring
 	stopMon := make(chan struct{})
@@ -97,9 +106,26 @@ func main() {
 		close(stopMon)
 		manager.Shutdown()
 	}()
+
+	// ENABLE_PPROF starts a localhost-only debug listener exposing
+	// /debug/pprof/* (goroutine count ~= live listeners) and /debug/vars
+	// (memstats). Handy for the /listen stress test; off by default.
+	if os.Getenv("ENABLE_PPROF") != "" {
+		pprofAddr := os.Getenv("PPROF_ADDR")
+		if pprofAddr == "" {
+			pprofAddr = "127.0.0.1:6060"
+		}
+		go func() {
+			log.Printf("pprof/expvar debug listener on %s", pprofAddr)
+			if err := http.ListenAndServe(pprofAddr, nil); err != nil {
+				log.Printf("pprof/expvar listener stopped: %v", err)
+			}
+		}()
+	}
+
 	log.Printf("Streaming server running at %s\n", cfg.ListenAddr)
 
-	if err := http.ListenAndServe(":"+cfg.ListenAddr, nil); err != nil {
+	if err := http.ListenAndServe(":"+cfg.ListenAddr, mux); err != nil {
 		log.Fatal("Server failed ", err)
 	}
 }
