@@ -2,6 +2,7 @@ package stream
 
 import (
 	"context"
+	"sort"
 	"sync"
 	"time"
 
@@ -197,5 +198,9 @@ func (s *Studio) collectSessions() (active int, countries map[string]int, sessio
 		}
 		sessions = append(sessions, session)
 	}
+	// Emit sessions in a stable order (map iteration above is randomized). The
+	// backend ingest locks listener_sessions rows in payload order; a consistent
+	// order across overlapping flushes avoids lock-order deadlocks.
+	sort.Slice(sessions, func(i, j int) bool { return sessions[i].ID < sessions[j].ID })
 	return
 }
