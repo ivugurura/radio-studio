@@ -21,8 +21,13 @@
 
 3. To start streaming live audio to a studio (from BUTT, etc):
 
-   - Point your encoder to:  
-     `http://your-server:7080/studios/studio1/live` (POST/PUT)
+    - For BUTT's Icecast `SOURCE` protocol, point the encoder directly to the
+       Studio service port, not an HTTP reverse proxy:
+       `http://your-server:7080/studios/reformation-rw/live`
+    - `SOURCE` is an HTTP/1.0, connection-delimited upload. A normal HTTP
+       reverse proxy can classify it as bodyless because it has neither
+       `Content-Length` nor chunked transfer encoding.
+    - Encoders that use standard `POST` or `PUT` may be proxied normally.
 
 4. To listen to a stream:
 

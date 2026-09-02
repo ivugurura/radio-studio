@@ -19,7 +19,9 @@ type Config struct {
 	IPHashSalt  string
 	EnableGeoIp bool
 
-	DefaultBitrateKbps int
+	DefaultBrKbps int
+	DefaultSrHz   int
+	DefaultCh     int
 
 	// Backend integration
 	BackendIngestURL   string
@@ -30,10 +32,6 @@ type Config struct {
 
 	// Fallback track
 	DefaultTrackFile string
-
-	// Streaming credeentials
-	User     string
-	Password string
 }
 
 func LoadConfig() *Config {
@@ -55,12 +53,12 @@ func LoadConfig() *Config {
 		BackendIngestURL:   get("BACKEND_INGEST_URL", ""), // e.g. https://api.example.com/internal/listener-events
 		BackendAPIKey:      get("BACKEND_API_KEY", ""),
 		BackendAPI:         get("BACKEND_API", ""),
-		EventFlushInterval: durationEnv("EVENT_FLUSH_INTERVAL", 5*time.Second),
+		EventFlushInterval: durationEnv("EVENT_FLUSH_INTERVAL", 15*time.Second),
 		SnapshotInterval:   durationEnv("SNAPSHOT_INTERVAL", 5*time.Second),
-		DefaultBitrateKbps: intEnv("DEFAULT_BITRATE_KBPS", 128),
+		DefaultBrKbps:      intEnv("DEFAULT_BR_KBPS", 128),
+		DefaultSrHz:        intEnv("DEFAULT_SR_HZ", 48000),
+		DefaultCh:          intEnv("DEFAULT_CH", 2),
 		DefaultTrackFile:   get("DEFAULT_TRACK_FILE", ""),
-		User:               get("STREAM_USER", ""),
-		Password:           get("STREAM_PASSWORD", ""),
 	}
 
 	return cfg
@@ -70,9 +68,10 @@ func durationEnv(key string, def time.Duration) time.Duration {
 	if v := os.Getenv(key); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
-			return d
+			log.Printf("config: invalid duration in %s=%s (using default)", key, v)
+			return def
 		}
-		log.Printf("config: invalid duration in %s=%s (using default)", key, v)
+		return d
 	}
 	return def
 }

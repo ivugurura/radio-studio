@@ -1,6 +1,7 @@
 package stream
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -114,6 +115,28 @@ func (a *autoDJ) streamFile(ctx context.Context, path string, bytesPerSec, chunk
 	}
 	defer f.Close()
 
+	err = a.streamReader(ctx, f, path, bytesPerSec, chunkSize)
+	if err == nil {
+		a.client.SendPlayerBatch(ctx, []analytics.IngestPlayBatch{{
+			Type:    "track_ended",
+			TrackID: a.current.ID,
+			File:    a.current.File,
+			Source:  "AUTO",
+			EndedAt: time.Now().UTC().Format(time.RFC3339),
+		}})
+	}
+	return err
+}
+
+// streamSilence loops a short embedded silent clip so an empty playlist produces
+// valid audio instead of dead air; it returns after ~1s so the caller can recheck the playlist.
+func (a *autoDJ) streamSilence(ctx context.Context, bytesPerSec, chunkSize int) error {
+	return a.streamReader(ctx, bytes.NewReader(silenceMP3), "", bytesPerSec, chunkSize)
+}
+
+// streamReader paces reads from r at bytesPerSec, pushing chunks to the studio feed.
+// activeFile "" (used for silence) never matches a.activeFile, so a buffered skip is a no-op.
+func (a *autoDJ) streamReader(ctx context.Context, r io.Reader, activeFile string, bytesPerSec, chunkSize int) error {
 	start := time.Now()
 	var sent int64
 	buf := make([]byte, chunkSize)
@@ -126,11 +149,10 @@ func (a *autoDJ) streamFile(ctx context.Context, path string, bytesPerSec, chunk
 			switch cmd {
 			case cmdSkip:
 				a.lock()
-				// TODO: Please check this Carefully
-				same := a.activeFile == path
+				same := a.activeFile == activeFile
 				a.unlock()
 				if same {
-					return &TrackError{Path: path, Kind: "skipped", Err: io.EOF}
+					return &TrackError{Path: activeFile, Kind: "skipped", Err: io.EOF}
 				}
 			case cmdForceReload:
 				a.playlist.forceReload()
@@ -140,7 +162,7 @@ func (a *autoDJ) streamFile(ctx context.Context, path string, bytesPerSec, chunk
 		default:
 		}
 
-		n, rerr := f.Read(buf)
+		n, rerr := r.Read(buf)
 		if n > 0 {
 			chunk := make([]byte, n)
 			copy(chunk, buf[:n])
@@ -155,16 +177,9 @@ func (a *autoDJ) streamFile(ctx context.Context, path string, bytesPerSec, chunk
 		}
 		if rerr != nil {
 			if rerr == io.EOF {
-				a.client.SendPlayerBatch(ctx, []analytics.IngestPlayBatch{{
-					Type:    "track_ended",
-					TrackID: a.current.ID,
-					File:    a.current.File,
-					Source:  "AUTO",
-					EndedAt: time.Now().UTC().Format(time.RFC3339),
-				}})
 				return nil // normal end
 			}
-			return &TrackError{Path: path, Kind: "read", Err: rerr}
+			return &TrackError{Path: activeFile, Kind: "read", Err: rerr}
 		}
 	}
 }
@@ -209,7 +224,7 @@ func (a *autoDJ) tryFallback(ctx context.Context, bytesPerSec, chunkSize int) bo
 func (a *autoDJ) Play(ctx context.Context) {
 	// 128 kbps => 16 KB/s
 	bytesPerSec := int(float64(a.bitrateKbps) * 1000.0 / 8.0)
-	chunkSize := 4096
+	chunkSize := audioChunkSize
 
 	for {
 		// Check for stop before scanning playlist.
@@ -230,7 +245,10 @@ func (a *autoDJ) Play(ctx context.Context) {
 				if a.tryFallback(ctx, bytesPerSec, chunkSize) {
 					continue
 				}
-				time.Sleep(3 * time.Second)
+				if err := a.streamSilence(ctx, bytesPerSec, chunkSize); err != nil && !errors.Is(err, context.Canceled) {
+					log.Printf("autoDJ: error streaming silence: %v", err)
+					time.Sleep(500 * time.Millisecond)
+				}
 				continue
 			}
 		}

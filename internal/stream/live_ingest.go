@@ -1,15 +1,17 @@
 package stream
 
 import (
+	"bufio"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
-
-	"github.com/ivugurura/radio-studio/config"
 )
 
 type LiveMeta struct {
@@ -18,30 +20,33 @@ type LiveMeta struct {
 	Description string
 	URL         string
 	Bitrate     string
+	SampleRate  string
+	Channels    string
 	Public      string
 	RawHeaders  map[string]string
 	UpdatedAt   time.Time
 }
 
-// Configure per studio if you want different passwords later
-var liveSourcePassword = "Test123" // TODO: load from config / env
+// liveSourceReader consumes the connection-delimited body sent by Icecast
+// encoders using the non-standard HTTP/1.0 SOURCE method.
+type liveSourceReader struct {
+	reader *bufio.Reader
+	conn   net.Conn
+}
 
-// Recommended encoder settings for seamless switching with AutoDJ:
-// - Codec: MP3
-// - Sample Rate: 44.1kHz
-// - Channels: Stereo
-// - Bitrate: 128kbps CBR (Constant Bitrate)
-// This matches typical AutoDJ pacing and minimizes codec/bitrate mismatches at splice points.
+func (r *liveSourceReader) Read(p []byte) (int, error) {
+	return r.reader.Read(p)
+}
 
-// Tunables for handling fragile encoders that briefly close right after connect
-var (
-	liveEarlyEOFGrace     = 5 * time.Second // total window after connect to tolerate early EOFs
-	liveEarlyEOFMaxRetrys = 5               // how many consecutive early EOFs to allow in grace window
-	liveEarlyEOFSleep     = 200 * time.Millisecond
-)
+func (r *liveSourceReader) Close() error {
+	return r.conn.Close()
+}
 
-// BasicAuth check for Icecast-like request
-func checkIcecastAuth(r *http.Request) error {
+// Recommended encoder settings for seamless switching with AutoDJ: MP3,
+// 48kHz, stereo, 128kbps CBR — must match the library (see DEFAULT_SR_HZ).
+
+// checkIcecastAuth validates Basic Auth against this studio's current credentials.
+func (s *Studio) checkIcecastAuth(r *http.Request) error {
 	auth := r.Header.Get("Authorization")
 	if auth == "" {
 		return errors.New("missing auth")
@@ -59,14 +64,34 @@ func checkIcecastAuth(r *http.Request) error {
 		return errors.New("invalid credential format")
 	}
 	user, pass := creds[0], creds[1]
-	cfg := config.LoadConfig()
-	if user != cfg.User {
+	expectedUser, expectedPass := s.credentials()
+	if expectedUser == "" || expectedPass == "" {
+		return errors.New("studio credentials not yet loaded")
+	}
+	if user != expectedUser {
 		return errors.New("invalid user")
 	}
-	if pass != cfg.Password {
+	if pass != expectedPass {
 		return errors.New("invalid password")
 	}
 	return nil
+}
+
+func (s *Studio) clearLiveIngest(reader io.ReadCloser) {
+	s.liveMu.Lock()
+	defer s.liveMu.Unlock()
+
+	// Only skip clearing if an active (non-nil) liveIngest belongs to a different session.
+	// When liveIngest is nil (setup failed before it was assigned), always clear.
+	if reader != nil && s.liveIngest != nil && s.liveIngest != reader {
+		return
+	}
+	if reader != nil {
+		_ = reader.Close()
+	}
+	s.liveIngest = nil
+	s.liveActive.Store(false)
+	s.clearLiveMeta()
 }
 
 func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
@@ -84,161 +109,253 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Auth
-	if err := checkIcecastAuth(r); err != nil {
+	if err := s.checkIcecastAuth(r); err != nil {
 		log.Printf("[live %s] auth failed: %v", s.ID, err)
 		w.Header().Set("WWW-Authenticate", `Basic realm="source"`)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
-	// Reject if one already active
-	if s.liveActive.Load() {
+	// Reserve the source before acknowledging the encoder so concurrent connects
+	// cannot both receive a successful response.
+	s.liveMu.Lock()
+	if s.liveIngest != nil || s.liveActive.Load() {
+		s.liveMu.Unlock()
 		http.Error(w, "live source already active", http.StatusConflict)
 		return
 	}
-
-	// Capture metadata
-	meta := extractLiveMeta(r)
-	s.setLiveMeta(meta)
+	s.liveActive.Store(true)
+	s.liveMu.Unlock()
 
 	var reader io.ReadCloser
-	var hijackedConn io.Closer
-
-	// Some clients send Expect: 100-continue before sending body on PUT/POST
-	if r.Method != "SOURCE" && strings.EqualFold(r.Header.Get("Expect"), "100-continue") {
-		w.WriteHeader(http.StatusContinue)
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
+	connected := false
+	defer func() {
+		s.clearLiveIngest(reader)
+		if connected {
+			log.Printf("[live %s] ended", s.ID)
+			if s.autoDJ != nil {
+				log.Printf("[live %s] AutoDJ resumed", s.ID)
+			}
 		}
-		log.Printf("[live %s] sent 100-continue for %s", s.ID, r.Method)
+	}()
+
+	meta := extractLiveMeta(r)
+	s.setLiveMeta(meta)
+	logFormatCheck(s.ID, s.bitrateKbps, s.srHz, s.ch, meta)
+
+	// Reject a mismatched encoder outright: a format mismatch breaks playback
+	// for listeners at the AutoDJ/live splice point (VLC and browsers alike).
+	if err := validateLiveBitrate(meta.Bitrate, s.bitrateKbps); err != nil {
+		log.Printf("[live %s] rejected: %v", s.ID, err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := validateLiveSampleRate(meta.SampleRate, s.srHz); err != nil {
+		log.Printf("[live %s] rejected: %v", s.ID, err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := validateLiveChannels(meta.Channels, s.ch); err != nil {
+		log.Printf("[live %s] rejected: %v", s.ID, err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 
-	// Decide whether to hijack: always for SOURCE; for PUT/POST if unknown/zero Content-Length to keep raw socket
-	if r.Method == "SOURCE" || ((r.Method == http.MethodPut || r.Method == http.MethodPost) && r.ContentLength <= 0) {
-		// Some Icecast source clients (e.g. BUTT) use custom METHOD SOURCE and may not set
-		// a Content-Length or transfer encoding. Hijack raw connection to read bytes directly.
-		hj, ok := w.(http.Hijacker)
+	if r.Method == "SOURCE" {
+		// BUTT sends `SOURCE ... HTTP/1.0` without Content-Length or chunked
+		// framing. net/http therefore exposes r.Body as empty. Hijacking retains
+		// its buffered bytes and lets us read the connection-delimited audio.
+		hijacker, ok := w.(http.Hijacker)
 		if !ok {
-			http.Error(w, "hijack not supported", http.StatusInternalServerError)
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 			return
 		}
-		conn, bufRW, err := hj.Hijack()
+		conn, readWriter, err := hijacker.Hijack()
 		if err != nil {
-			log.Printf("[live %s] hijack failed: %v", s.ID, err)
+			log.Printf("[live %s] could not hijack SOURCE connection: %v", s.ID, err)
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 			return
 		}
-		// Send minimal Icecast-like response
-		_, _ = bufRW.WriteString("HTTP/1.0 200 OK\r\nServer: Icecast 2.4.0\r\n\r\n")
-		_ = bufRW.Flush()
-		reader = conn
-		hijackedConn = conn
+		if _, err := readWriter.WriteString("HTTP/1.0 200 OK\r\nServer: Icecast 2.4.0\r\n\r\n"); err != nil {
+			_ = conn.Close()
+			log.Printf("[live %s] could not acknowledge SOURCE connection: %v", s.ID, err)
+			return
+		}
+		if err := readWriter.Flush(); err != nil {
+			_ = conn.Close()
+			log.Printf("[live %s] could not flush SOURCE acknowledgement: %v", s.ID, err)
+			return
+		}
+		reader = &liveSourceReader{reader: readWriter.Reader, conn: conn}
 	} else {
-		// Regular HTTP methods (PUT/POST) streaming body
-		log.Println("=======>Excuted")
+		reader = r.Body
+		if strings.EqualFold(r.Header.Get("Expect"), "100-continue") {
+			w.WriteHeader(http.StatusContinue)
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			log.Printf("[live %s] sent 100-continue for %s", s.ID, r.Method)
+		}
+		if err := http.NewResponseController(w).EnableFullDuplex(); err != nil {
+			log.Printf("[live %s] could not enable full duplex: %v", s.ID, err)
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
-		reader = r.Body
 	}
 
-	// Mark active
 	s.liveMu.Lock()
 	s.liveIngest = reader
-	s.liveActive.Store(true)
 	s.liveMu.Unlock()
+	connected = true
 
-	log.Printf("[live %s] connected: method=%s name=%q bitrate=%s", s.ID, r.Method, meta.Name, meta.Bitrate)
+	log.Printf("[live %s] connected: method=%s name=%q bitrate=%s samplerate=%s channels=%s", s.ID, r.Method, meta.Name, meta.Bitrate, meta.SampleRate, meta.Channels)
 
-	buf := make([]byte, 8192)
-	graceStart := time.Now()
-	earlyEOFs := 0
+	buf := make([]byte, audioChunkSize)
 	bytesReceived := 0
 	receivedAudio := false
-	isPutLike := r.Method == http.MethodPut || r.Method == http.MethodPost
 	for {
 		n, err := reader.Read(buf)
 		if n > 0 {
 			chunk := make([]byte, n)
 			copy(chunk, buf[:n])
-			// Write to liveFeed instead of directly pushing
 			select {
 			case s.liveFeed <- chunk:
-			default:
-				// Drop if channel is full (rare with adequate buffer)
+			case <-s.stop:
+				return
 			}
 			bytesReceived += n
 			if !receivedAudio {
 				receivedAudio = true
-				log.Printf("[live %s] first audio after %s (bytes=%d)", s.ID, time.Since(graceStart).Round(time.Millisecond), bytesReceived)
-			}
-			if earlyEOFs > 0 {
-				earlyEOFs = 0
+				log.Printf("[live %s] first audio received (bytes=%d)", s.ID, bytesReceived)
 			}
 		}
 		if err != nil {
-			if (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) && n == 0 && !receivedAudio {
-				// Time based grace only (ignore retry cap) until maxGrace exceeded
-				graceElapsed := time.Since(graceStart)
-				maxGrace := liveEarlyEOFGrace
-				if isPutLike {
-					maxGrace = liveEarlyEOFGrace + 10*time.Second
-				}
-				if graceElapsed < maxGrace {
-					earlyEOFs++
-					if earlyEOFs%5 == 0 { // log every 5th attempt to reduce noise
-						log.Printf("[live %s] waiting for first audio (EOF attempts=%d elapsed=%s grace=%s method=%s)", s.ID, earlyEOFs, graceElapsed.Round(time.Millisecond), maxGrace, r.Method)
-					}
-					time.Sleep(liveEarlyEOFSleep)
-					continue
-				}
-			}
-			// If we reached here: either audio received then read ended, or grace expired without audio
 			if !receivedAudio {
-				log.Printf("[live %s] terminating: no audio within grace (elapsed=%s attempts=%d method=%s)", s.ID, time.Since(graceStart).Round(time.Millisecond), earlyEOFs, r.Method)
+				log.Printf("[live %s] ended before receiving audio: %v", s.ID, err)
 			} else {
 				log.Printf("[live %s] READ end n=%d err=%v (totalBytes=%d)", s.ID, n, err, bytesReceived)
 			}
 			break
 		}
 	}
+}
 
-	if hijackedConn != nil {
-		_ = hijackedConn.Close()
+// parseIceAudioInfo parses Ice-Audio-Info's "key=value;..." pairs, stripping
+// an optional "ice-" key prefix (some encoders send "ice-bitrate", not "bitrate").
+func parseIceAudioInfo(raw string) map[string]string {
+	out := make(map[string]string)
+	for _, part := range strings.Split(raw, ";") {
+		kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
+		if len(kv) != 2 || kv[0] == "" {
+			continue
+		}
+		key := strings.TrimPrefix(strings.ToLower(kv[0]), "ice-")
+		out[key] = kv[1]
 	}
-
-	s.liveMu.Lock()
-	if s.liveIngest != nil {
-		_ = s.liveIngest.Close()
-		s.liveIngest = nil
-	}
-	s.liveActive.Store(false)
-	s.clearLiveMeta()
-	s.liveMu.Unlock()
-
-	log.Printf("[live %s] ended", s.ID)
-	// Log AutoDJ resume after live suppression ends (if AutoDJ configured)
-	if s.autoDJ != nil {
-		log.Printf("[live %s] AutoDJ resumed", s.ID)
-	}
+	return out
 }
 
 // Live metadata helpers
 func extractLiveMeta(r *http.Request) LiveMeta {
+	audioInfo := parseIceAudioInfo(r.Header.Get("Ice-Audio-Info"))
+
+	// Resolve bitrate: Ice-Bitrate (BUTT), Icy-Br (ffmpeg), or inside Ice-Audio-Info.
+	bitrate := r.Header.Get("Ice-Bitrate")
+	if bitrate == "" {
+		bitrate = r.Header.Get("Icy-Br")
+	}
+	if bitrate == "" {
+		bitrate = audioInfo["bitrate"]
+	}
+
 	lm := LiveMeta{
 		Name:        r.Header.Get("Ice-Name"),
 		Genre:       r.Header.Get("Ice-Genre"),
 		Description: r.Header.Get("Ice-Description"),
 		URL:         r.Header.Get("Ice-URL"),
-		Bitrate:     r.Header.Get("Ice-Bitrate"),
+		Bitrate:     bitrate,
+		SampleRate:  audioInfo["samplerate"],
+		Channels:    audioInfo["channels"],
 		Public:      r.Header.Get("Ice-Public"),
 		RawHeaders:  map[string]string{},
 		UpdatedAt:   time.Now().UTC(),
 	}
 	for k, v := range r.Header {
-		if strings.HasPrefix(strings.ToLower(k), "ice-") {
+		kl := strings.ToLower(k)
+		if strings.HasPrefix(kl, "ice-") || strings.HasPrefix(kl, "icy-") {
 			lm.RawHeaders[k] = strings.Join(v, ", ")
 		}
 	}
 	return lm
+}
+
+// parseNumericHeader extracts a leading numeric value, tolerating suffixes like "128kb/s".
+func parseNumericHeader(raw string) (int, bool) {
+	digits := strings.TrimFunc(raw, func(r rune) bool { return r < '0' || r > '9' })
+	n, err := strconv.Atoi(digits)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+func matchLabel(got int, ok bool, expected int) string {
+	if !ok {
+		return "unknown"
+	}
+	if got == expected {
+		return "false"
+	}
+	return "true"
+}
+
+// logFormatCheck logs the encoder's declared format against what the studio expects.
+func logFormatCheck(studioID string, expectedKbps, expectedHz, expectedCh int, meta LiveMeta) {
+	receivedKbps, kbpsOK := parseNumericHeader(meta.Bitrate)
+	receivedHz, hzOK := parseNumericHeader(meta.SampleRate)
+	receivedCh, chOK := parseNumericHeader(meta.Channels)
+	log.Printf("[live %s] FORMAT-CHECK expected_bitrate=%dkbps received_bitrate=%q bitrate_mismatch=%s expected_samplerate=%dHz received_samplerate=%q samplerate_mismatch=%s expected_channels=%d received_channels=%q channels_mismatch=%s",
+		studioID, expectedKbps, meta.Bitrate, matchLabel(receivedKbps, kbpsOK, expectedKbps),
+		expectedHz, meta.SampleRate, matchLabel(receivedHz, hzOK, expectedHz),
+		expectedCh, meta.Channels, matchLabel(receivedCh, chOK, expectedCh))
+}
+
+// validateLiveBitrate rejects a connection whose bitrate is missing or doesn't match expectedKbps.
+func validateLiveBitrate(rawBitrate string, expectedKbps int) error {
+	n, ok := parseNumericHeader(rawBitrate)
+	if !ok {
+		return fmt.Errorf("missing or unparseable live bitrate (studio expects %dkbps; encoder must send Ice-Bitrate, Icy-Br, or Ice-Audio-Info)", expectedKbps)
+	}
+	if n != expectedKbps {
+		return fmt.Errorf("live bitrate mismatch: encoder sent %dkbps, studio expects %dkbps", n, expectedKbps)
+	}
+	return nil
+}
+
+// validateLiveSampleRate rejects a connection whose sample rate is missing or doesn't match expectedHz.
+func validateLiveSampleRate(rawSampleRate string, expectedHz int) error {
+	n, ok := parseNumericHeader(rawSampleRate)
+	if !ok {
+		return fmt.Errorf("missing or unparseable live sample rate (studio expects %dHz; encoder must send Ice-Audio-Info with a samplerate field)", expectedHz)
+	}
+	if n != expectedHz {
+		return fmt.Errorf("live sample rate mismatch: encoder sent %dHz, studio expects %dHz", n, expectedHz)
+	}
+	return nil
+}
+
+// validateLiveChannels rejects a connection whose channel count is missing or doesn't match expectedCh.
+func validateLiveChannels(rawChannels string, expectedCh int) error {
+	n, ok := parseNumericHeader(rawChannels)
+	if !ok {
+		return fmt.Errorf("missing or unparseable live channel count (studio expects %d; encoder must send Ice-Audio-Info with a channels field)", expectedCh)
+	}
+	if n != expectedCh {
+		return fmt.Errorf("live channel count mismatch: encoder sent %d, studio expects %d", n, expectedCh)
+	}
+	return nil
 }
