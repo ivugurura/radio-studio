@@ -53,7 +53,7 @@ func LoadConfig() *Config {
 		BackendIngestURL:   get("BACKEND_INGEST_URL", ""), // e.g. https://api.example.com/internal/listener-events
 		BackendAPIKey:      get("BACKEND_API_KEY", ""),
 		BackendAPI:         get("BACKEND_API", ""),
-		EventFlushInterval: durationEnv("EVENT_FLUSH_INTERVAL", 5*time.Second),
+		EventFlushInterval: durationEnv("EVENT_FLUSH_INTERVAL", 15*time.Second),
 		SnapshotInterval:   durationEnv("SNAPSHOT_INTERVAL", 5*time.Second),
 		DefaultBrKbps:      intEnv("DEFAULT_BR_KBPS", 128),
 		DefaultSrHz:        intEnv("DEFAULT_SR_HZ", 48000),
@@ -68,9 +68,10 @@ func durationEnv(key string, def time.Duration) time.Duration {
 	if v := os.Getenv(key); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
-			return d
+			log.Printf("config: invalid duration in %s=%s (using default)", key, v)
+			return def
 		}
-		log.Printf("config: invalid duration in %s=%s (using default)", key, v)
+		return d
 	}
 	return def
 }
