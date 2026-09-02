@@ -134,12 +134,22 @@ func (s *Studio) StartAnalytics(ingestURL, apiKey string, flushEvery time.Durati
 
 		last := time.Now().UTC()
 
+		const (
+			listenerResendDeltaBytes   = 1 << 20 // ~64s of audio at 128 kbps
+			listenerFullReconcileEvery = 12      // at 15s flush => every ~3 min
+		)
+		sentBytes := map[string]int64{}
+		flushN := 0
+
 		for {
 			select {
 			case <-tick.C:
 			case <-stop:
 				return
 			}
+
+			flushN++
+			fullReconcile := flushN%listenerFullReconcileEvery == 1
 
 			now := time.Now().UTC()
 			active, countries, sessions := s.collectSessions()
@@ -148,15 +158,41 @@ func (s *Studio) StartAnalytics(ingestURL, apiKey string, flushEvery time.Durati
 			bk.accrueListenerMinutes(now.Sub(last), active)
 			last = now
 
-			// Build batch
+			toSend := make([]analytics.ListenerSession, 0, len(sessions))
+			present := make(map[string]struct{}, len(sessions))
+			for _, sess := range sessions {
+				present[sess.ID] = struct{}{}
+				prev, known := sentBytes[sess.ID]
+				if fullReconcile || !known || sess.EndedAt != nil ||
+					sess.TotalBytes-prev >= listenerResendDeltaBytes {
+					toSend = append(toSend, sess)
+				}
+			}
+
+			buckets := bk.drainReady(now.Add(-1 * time.Second))
+			if len(toSend) == 0 && len(buckets) == 0 {
+				continue
+			}
+
 			batch := analytics.IngestListenerBatch{
 				StudioID: s.ID,
-				Sessions: sessions,
-				Buckets:  bk.drainReady(now.Add(-1 * time.Second)),
+				Sessions: toSend,
+				Buckets:  buckets,
 			}
 
 			// send but don't block streaming on errors
-			_ = client.SendListenerBatch(context.Background(), batch)
+			if err := client.SendListenerBatch(context.Background(), batch); err != nil {
+				continue // keep sentBytes as-is so these sessions retry next flush
+			}
+
+			for _, sess := range toSend {
+				sentBytes[sess.ID] = sess.TotalBytes
+			}
+			for id := range sentBytes {
+				if _, ok := present[id]; !ok {
+					delete(sentBytes, id)
+				}
+			}
 		}
 	}()
 
