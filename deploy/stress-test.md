@@ -115,7 +115,7 @@ removes WAN noise — isolates CPU / RAM / goroutines / FDs):
 
 ```sh
 ulimit -n 1048576
-go run ./cmd/loadtest \
+go run ./cmd/loadtest/main.go \
   -url http://STAGING_HOST:7081/studios/reformation-rw/listen \
   -start 200 -step 200 -step-interval 45s -max 20000 -hold 60s \
   -out phaseA.csv
