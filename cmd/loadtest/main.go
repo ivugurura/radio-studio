@@ -46,6 +46,7 @@ type config struct {
 	hold         time.Duration
 	rate         int
 	realtime     bool
+	warmup       time.Duration
 	spawnDelay   time.Duration
 	dialTimeout  time.Duration
 	reportEvery  time.Duration
@@ -64,6 +65,7 @@ func parseFlags() config {
 	flag.DurationVar(&cfg.hold, "hold", 60*time.Second, "time to hold at max before stopping")
 	flag.IntVar(&cfg.rate, "rate", 16000, "per-connection drain rate in bytes/sec (128 kbps = 16000)")
 	flag.StringVar(&drain, "drain", "realtime", "body drain mode: realtime (pace to -rate) or fast (read as fast as possible)")
+	flag.DurationVar(&cfg.warmup, "warmup", 20*time.Second, "per-connection history required before it counts toward the audio-underrun signal")
 	flag.DurationVar(&cfg.spawnDelay, "spawn-delay", 2*time.Millisecond, "delay between individual dials while spawning")
 	flag.DurationVar(&cfg.dialTimeout, "dial-timeout", 10*time.Second, "TCP dial + response-header timeout")
 	flag.DurationVar(&cfg.reportEvery, "report-every", 5*time.Second, "progress report / CSV row interval")
@@ -110,12 +112,13 @@ type stats struct {
 	totalBytes   atomic.Int64
 	maxConnected atomic.Int64
 
-	mu       sync.Mutex
-	ttfb     []time.Duration // request start -> first body byte, every sample
-	perConn  map[int64]*connStat
-	failLvl  int64 // intended level at first failure signal, 0 = none yet
-	failWhen time.Duration
-	failWhy  string
+	mu         sync.Mutex
+	ttfb       []time.Duration // request start -> first body byte, every sample
+	perConn    map[int64]*connStat
+	maxAggMBps float64 // peak measured aggregate throughput over any report interval
+	failLvl    int64   // intended level at first failure signal, 0 = none yet
+	failWhen   time.Duration
+	failWhy    string
 }
 
 func newStats() *stats {
@@ -261,6 +264,11 @@ type sample struct {
 	aggMBps                       float64
 	ttfbP50, ttfbP95, ttfbP99     time.Duration
 	perConnMinKBps, perConnMean   float64
+	// perConnMinMature is the slowest connection that has at least cfg.warmup of
+	// history; matureConns is how many qualified. Only these feed the underrun
+	// signal, so a noisy first tick can't trip it.
+	perConnMinMature float64
+	matureConns      int
 }
 
 func runReporter(ctx context.Context, cfg config, st *stats, done chan<- struct{}) {
@@ -276,8 +284,9 @@ func runReporter(ctx context.Context, cfg config, st *stats, done chan<- struct{
 			w = csv.NewWriter(f)
 			_ = w.Write([]string{
 				"elapsed_s", "intended", "connected", "connect_errs", "early_closed",
-				"close_ended", "close_reset", "close_other", "agg_mbps",
-				"ttfb_p50_ms", "ttfb_p95_ms", "ttfb_p99_ms", "perconn_min_kbps", "perconn_mean_kbps",
+				"close_ended", "close_reset", "close_other", "agg_mbps", "agg_mbit",
+				"ttfb_p50_ms", "ttfb_p95_ms", "ttfb_p99_ms",
+				"perconn_min_kbps", "perconn_min_mature_kbps", "mature_conns", "perconn_mean_kbps",
 			})
 			w.Flush()
 		}
@@ -293,16 +302,23 @@ func runReporter(ctx context.Context, cfg config, st *stats, done chan<- struct{
 
 	emit := func() {
 		now := time.Now()
-		s := collect(st, now, t0, lastBytes, lastAt)
+		s := collect(st, now, t0, lastBytes, lastAt, cfg.warmup)
 		lastBytes = st.totalBytes.Load()
 		lastAt = now
 
 		if c := s.connected; c > st.maxConnected.Load() {
 			st.maxConnected.Store(c)
 		}
+		st.mu.Lock()
+		if s.aggMBps > st.maxAggMBps {
+			st.maxAggMBps = s.aggMBps
+		}
+		st.mu.Unlock()
 
-		// Failure-signal detection: new connect errors, new early closes, or a
-		// live listener starved below 90% of the target drain rate.
+		// Failure-signal detection: new connect errors, new server-side drops, or
+		// a warmed-up listener starved below 90% of the target drain rate. The
+		// underrun check only looks at connections with >= cfg.warmup of history
+		// so a noisy first tick (TCP slow-start, buffer prefill) can't trip it.
 		underrunFloor := float64(cfg.rate) * 0.9 / 1024.0
 		newErrs := s.connectErrs - prevErrs
 		newEarly := s.earlyClosed - prevEarly
@@ -312,16 +328,16 @@ func runReporter(ctx context.Context, cfg config, st *stats, done chan<- struct{
 			st.noteFailure(s.elapsed, s.intended, fmt.Sprintf("%d new connect errors", newErrs))
 		case newEarly > 0:
 			st.noteFailure(s.elapsed, s.intended, fmt.Sprintf("%d listeners dropped by server", newEarly))
-		case s.connected > 0 && cfg.realtime && s.perConnMinKBps > 0 && s.perConnMinKBps < underrunFloor:
-			st.noteFailure(s.elapsed, s.intended, fmt.Sprintf("audio underrun: slowest listener %.1f KB/s < %.1f", s.perConnMinKBps, underrunFloor))
+		case cfg.realtime && s.matureConns > 0 && s.perConnMinMature < underrunFloor:
+			st.noteFailure(s.elapsed, s.intended, fmt.Sprintf("audio underrun: slowest warmed listener %.1f KB/s < %.1f (of %d warmed)", s.perConnMinMature, underrunFloor, s.matureConns))
 		}
 
 		fmt.Fprintf(os.Stderr,
-			"[%6.0fs] intended=%-6d connected=%-6d cerr=%-4d dropped=%-4d(ended=%d reset=%d other=%d) agg=%6.1f MB/s ttfb50=%-5s p95=%-6s minKB/s=%6.1f meanKB/s=%6.1f\n",
+			"[%6.0fs] intended=%-6d connected=%-6d cerr=%-4d dropped=%-4d(ended=%d reset=%d other=%d) agg=%6.1f MB/s (%5.0f Mbit) ttfb50=%-5s p95=%-6s minKB/s=%6.1f (warm %6.1f/%d) meanKB/s=%6.1f\n",
 			s.elapsed.Seconds(), s.intended, s.connected, s.connectErrs, s.earlyClosed,
-			s.closeEnded, s.closeReset, s.other, s.aggMBps,
+			s.closeEnded, s.closeReset, s.other, s.aggMBps, s.aggMBps*8,
 			s.ttfbP50.Round(time.Millisecond), s.ttfbP95.Round(time.Millisecond),
-			s.perConnMinKBps, s.perConnMean)
+			s.perConnMinKBps, s.perConnMinMature, s.matureConns, s.perConnMean)
 
 		if w != nil {
 			_ = w.Write([]string{
@@ -334,10 +350,13 @@ func runReporter(ctx context.Context, cfg config, st *stats, done chan<- struct{
 				strconv.FormatInt(s.closeReset, 10),
 				strconv.FormatInt(s.other, 10),
 				strconv.FormatFloat(s.aggMBps, 'f', 2, 64),
+				strconv.FormatFloat(s.aggMBps*8, 'f', 1, 64),
 				strconv.FormatFloat(float64(s.ttfbP50.Microseconds())/1000, 'f', 1, 64),
 				strconv.FormatFloat(float64(s.ttfbP95.Microseconds())/1000, 'f', 1, 64),
 				strconv.FormatFloat(float64(s.ttfbP99.Microseconds())/1000, 'f', 1, 64),
 				strconv.FormatFloat(s.perConnMinKBps, 'f', 1, 64),
+				strconv.FormatFloat(s.perConnMinMature, 'f', 1, 64),
+				strconv.FormatInt(int64(s.matureConns), 10),
 				strconv.FormatFloat(s.perConnMean, 'f', 1, 64),
 			})
 			w.Flush()
@@ -357,11 +376,13 @@ func runReporter(ctx context.Context, cfg config, st *stats, done chan<- struct{
 	}
 }
 
-func collect(st *stats, now, t0 time.Time, lastBytes int64, lastAt time.Time) sample {
+func collect(st *stats, now, t0 time.Time, lastBytes int64, lastAt time.Time, warmup time.Duration) sample {
+	warmupS := warmup.Seconds()
 	st.mu.Lock()
 	ttfb := make([]time.Duration, len(st.ttfb))
 	copy(ttfb, st.ttfb)
 	kbps := make([]float64, 0, len(st.perConn))
+	matureMin, matureCount := 0.0, 0
 	for _, cs := range st.perConn {
 		if !cs.alive.Load() {
 			continue
@@ -374,7 +395,14 @@ func collect(st *stats, now, t0 time.Time, lastBytes int64, lastAt time.Time) sa
 		if el <= 0 {
 			continue
 		}
-		kbps = append(kbps, float64(cs.bytes.Load())/1024.0/el)
+		rate := float64(cs.bytes.Load()) / 1024.0 / el
+		kbps = append(kbps, rate)
+		if el >= warmupS {
+			if matureCount == 0 || rate < matureMin {
+				matureMin = rate
+			}
+			matureCount++
+		}
 	}
 	st.mu.Unlock()
 
@@ -401,20 +429,22 @@ func collect(st *stats, now, t0 time.Time, lastBytes int64, lastAt time.Time) sa
 	}
 
 	return sample{
-		elapsed:        now.Sub(t0),
-		intended:       st.intended.Load(),
-		connected:      st.connected.Load(),
-		connectErrs:    st.connectErrs.Load(),
-		earlyClosed:    st.earlyClosed.Load(),
-		closeEnded:     st.closeEnded.Load(),
-		closeReset:     st.closeReset.Load(),
-		other:          st.closeOther.Load(),
-		aggMBps:        agg,
-		ttfbP50:        percentile(ttfb, 50),
-		ttfbP95:        percentile(ttfb, 95),
-		ttfbP99:        percentile(ttfb, 99),
-		perConnMinKBps: minK,
-		perConnMean:    meanK,
+		elapsed:          now.Sub(t0),
+		intended:         st.intended.Load(),
+		connected:        st.connected.Load(),
+		connectErrs:      st.connectErrs.Load(),
+		earlyClosed:      st.earlyClosed.Load(),
+		closeEnded:       st.closeEnded.Load(),
+		closeReset:       st.closeReset.Load(),
+		other:            st.closeOther.Load(),
+		aggMBps:          agg,
+		ttfbP50:          percentile(ttfb, 50),
+		ttfbP95:          percentile(ttfb, 95),
+		ttfbP99:          percentile(ttfb, 99),
+		perConnMinKBps:   minK,
+		perConnMean:      meanK,
+		perConnMinMature: matureMin,
+		matureConns:      matureCount,
 	}
 }
 
@@ -565,9 +595,10 @@ func main() {
 func printSummary(cfg config, st *stats, elapsed time.Duration) {
 	st.mu.Lock()
 	failLvl, failWhen, failWhy := st.failLvl, st.failWhen, st.failWhy
+	maxAgg := st.maxAggMBps
 	st.mu.Unlock()
 
-	egressMBps := float64(st.maxConnected.Load()) * float64(cfg.rate) / 1e6
+	wantMBps := float64(st.maxConnected.Load()) * float64(cfg.rate) / 1e6
 
 	fmt.Fprintln(os.Stderr, "\n──────── summary ────────")
 	fmt.Fprintf(os.Stderr, "duration:                 %s\n", elapsed.Round(time.Second))
@@ -576,8 +607,16 @@ func printSummary(cfg config, st *stats, elapsed time.Duration) {
 	fmt.Fprintf(os.Stderr, "connect errors:           %d\n", st.connectErrs.Load())
 	fmt.Fprintf(os.Stderr, "dropped by server:        %d (ended=%d reset=%d other=%d)\n",
 		st.earlyClosed.Load(), st.closeEnded.Load(), st.closeReset.Load(), st.closeOther.Load())
-	fmt.Fprintf(os.Stderr, "approx egress at peak:    %.1f MB/s (%.0f kbps/listener)\n",
-		egressMBps, float64(cfg.rate)*8/1000)
+	intendedMBps := float64(st.intended.Load()) * float64(cfg.rate) / 1e6
+	fmt.Fprintf(os.Stderr, "peak measured throughput: %.1f MB/s = %.0f Mbit/s\n", maxAgg, maxAgg*8)
+	fmt.Fprintf(os.Stderr, "  demand at peak streams: %.1f MB/s = %.0f Mbit/s (%d streams)\n",
+		wantMBps, wantMBps*8, st.maxConnected.Load())
+	fmt.Fprintf(os.Stderr, "  demand at intended max: %.1f MB/s = %.0f Mbit/s (%d streams x %.0f kbps)\n",
+		intendedMBps, intendedMBps*8, st.intended.Load(), float64(cfg.rate)*8/1000)
+	if failLvl != 0 && maxAgg > 0 && intendedMBps > maxAgg*1.2 {
+		fmt.Fprintf(os.Stderr, "  -> throughput plateaued well below demand: suspect a shared ceiling"+
+			" (server NIC / uplink, CPU, or Nginx) - check iftop/top on the server\n")
+	}
 	if failLvl == 0 {
 		fmt.Fprintf(os.Stderr, "result:                   NO failure signal up to %d listeners\n", st.maxConnected.Load())
 	} else {

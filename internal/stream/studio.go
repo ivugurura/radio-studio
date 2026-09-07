@@ -186,19 +186,6 @@ func (s *Studio) LiveMeta() *LiveMeta {
 	return &m
 }
 
-// func (s *Studio) startAutoDJ() {
-// 	ctx, cancel := context.WithCancel(context.Background())
-// 	s.autoDJCancel = cancel
-// 	runner := s.autoDJ(s.audioDir, s.bitrateKbps, func(b []byte) {
-// 		// If you want to suppress AutoDJ during live, check s.liveActive.Load() here
-// 		if s.liveActive.Load() {
-// 			return
-// 		}
-// 		s.push(b)
-// 	})
-// 	go runner.Play(ctx)
-// }
-
 func (s *Studio) snapshotLoop() {
 	t := time.NewTicker(s.snapshotInterval)
 	defer t.Stop()
@@ -345,52 +332,6 @@ func (s *Studio) distribute() {
 		s.listenersMu.RUnlock()
 	}
 	log.Printf("Studio %s: distributor stopped", s.ID)
-}
-
-// HandleLiveIngest is called when a live encoder (e.g., BUTT) streams audio to the server.
-// Only one live stream at a time is supported per studio.
-func (s *Studio) HandleLiveIngestV1(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost && r.Method != http.MethodPut {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	reader := r.Body
-	s.liveMu.Lock()
-	if s.liveIngest != nil {
-		s.liveIngest.Close() // Stop any previous live stream
-	}
-
-	s.liveIngest = reader
-	s.liveActive.Store(true)
-	s.liveMu.Unlock()
-
-	log.Printf("Studio %s: live stream started", s.ID)
-
-	buf := make([]byte, audioChunkSize)
-	for {
-		n, err := reader.Read(buf)
-		if n > 0 {
-			chunk := make([]byte, n)
-			copy(chunk, buf[:n])
-			select {
-			case s.liveFeed <- chunk:
-			case <-s.stop:
-				return
-			}
-		}
-		if err != nil {
-			break
-		}
-	}
-	s.liveMu.Lock()
-	if s.liveIngest == reader {
-		_ = reader.Close()
-		s.liveIngest = nil
-		s.liveActive.Store(false)
-	}
-	s.liveMu.Unlock()
-	log.Printf("Studio %s: live stream ended", s.ID)
 }
 
 // HandleListen streams audio (live or AutoDJ) to a listener.

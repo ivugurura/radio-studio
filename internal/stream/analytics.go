@@ -204,8 +204,6 @@ func (s *Studio) collectSessions() (active int, countries map[string]int, sessio
 	countries = map[string]int{}
 
 	s.listenersMu.RLock()
-	defer s.listenersMu.RUnlock()
-
 	for sl := range s.streamListeners {
 		l := sl.l
 		// aggregate
@@ -234,9 +232,13 @@ func (s *Studio) collectSessions() (active int, countries map[string]int, sessio
 		}
 		sessions = append(sessions, session)
 	}
+	s.listenersMu.RUnlock()
+
 	// Emit sessions in a stable order (map iteration above is randomized). The
 	// backend ingest locks listener_sessions rows in payload order; a consistent
-	// order across overlapping flushes avoids lock-order deadlocks.
+	// order across overlapping flushes avoids lock-order deadlocks. Sort after
+	// releasing the read lock so it does not compete with distribute() during a
+	// connect/disconnect storm.
 	sort.Slice(sessions, func(i, j int) bool { return sessions[i].ID < sessions[j].ID })
 	return
 }
