@@ -58,13 +58,11 @@ func (b *bucketState) addSample(now time.Time, active int, countries map[string]
 			}
 			m[start] = bkt
 		}
-		// peak
 		if active > bkt.ActivePeak {
 			bkt.ActivePeak = active
 		}
-		// accrue listener-minutes proportionally to sampling period (we'll add per flush)
-		// the caller will add ListenerMinutes outside with actual elapsed minutes
-		// merge countries
+		// ListenerMinutes are not accrued here; accrueListenerMinutes adds them
+		// separately using the actual elapsed time since the last flush.
 		for c, n := range countries {
 			bkt.Countries[c] += n
 		}
@@ -99,7 +97,7 @@ func (b *bucketState) accrueListenerMinutes(delta time.Duration, active int) {
 	if active <= 0 || delta <= 0 {
 		return
 	}
-	minutes := int(delta.Minutes() + 0.5) //round to nearest minute
+	minutes := int(delta.Minutes() + 0.5)
 	if minutes <= 0 {
 		return
 	}
@@ -153,7 +151,6 @@ func (s *Studio) StartAnalytics(ingestURL, apiKey string, flushEvery time.Durati
 
 			now := time.Now().UTC()
 			active, countries, sessions := s.collectSessions()
-			// add a sample to peak/countries, and accrue listener-minutes since last flush
 			bk.addSample(now, active, countries)
 			bk.accrueListenerMinutes(now.Sub(last), active)
 			last = now
@@ -206,7 +203,6 @@ func (s *Studio) collectSessions() (active int, countries map[string]int, sessio
 	s.listenersMu.RLock()
 	for sl := range s.streamListeners {
 		l := sl.l
-		// aggregate
 		if l.DisconnectedAt.Load() == nil {
 			active++
 		}

@@ -77,11 +77,9 @@ func NewManager(baseDir string, geoR *geo.Resolver, opts ...ManagerOption) *Mana
 		defaultCh:        2,
 		geoResolver:      geoR,
 		snapshotInterval: 5 * time.Second,
-		// Provide a default AutoDJ factory that works even if no backend playlist is configured.
-		// It passes empty strings so the backend playlist fetch will noop; you can supply a fallback track via ManagerOption later.
 		autoDJFactory: func(dir string, studioID string, bitrate int, push func([]byte)) AutoDJ {
-			// Empty endpoint/apiKey/fallback means AutoDJ will attempt backend fetch (fails silently) and just idle unless a fallback is later provided.
-			// To enable a simple filesystem playlist, implement a filesystemPlaylist and wire it here.
+			// Empty endpoint/apiKey/fallback: AutoDJ's backend fetch fails silently and it
+			// just idles unless a fallback track is supplied via ManagerOption.
 			return NewAutoDJ(dir, studioID, bitrate, push, "", "", "")
 		},
 		factory: func(id, dir string, bitrate, srHz, ch int, geoR *geo.Resolver, dj AutoDJFactory, snapInt time.Duration) *Studio {

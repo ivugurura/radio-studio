@@ -13,7 +13,6 @@ import (
 	"github.com/ivugurura/radio-studio/internal/analytics"
 )
 
-// control commands
 type djCommand int
 
 const (
@@ -168,7 +167,6 @@ func (a *autoDJ) streamReader(ctx context.Context, r io.Reader, activeFile strin
 			copy(chunk, buf[:n])
 			a.push(chunk)
 			sent += int64(n)
-			// pacing
 			expected := time.Duration(float64(sent) / float64(bytesPerSec) * float64(time.Second))
 			elapsed := time.Since(start)
 			if expected > elapsed {
@@ -227,14 +225,12 @@ func (a *autoDJ) Play(ctx context.Context) {
 	chunkSize := audioChunkSize
 
 	for {
-		// Check for stop before scanning playlist.
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
 
-		// ensure we have a playlist
 		a.playlist.ensure()
 		cur, ok := a.playlist.current()
 		if !ok {
@@ -254,7 +250,6 @@ func (a *autoDJ) Play(ctx context.Context) {
 		}
 		next, _ := a.playlist.nextTrack()
 
-		// Update now playing
 		a.lock()
 		a.current = cur
 		a.next = next
@@ -276,11 +271,9 @@ func (a *autoDJ) Play(ctx context.Context) {
 			if errors.Is(err, context.Canceled) {
 				return
 			}
-			// log * continue to the enxt track
 			log.Printf("AudioDJ: file ended (%s): %v", cur.Title, err)
 		}
 
-		// After file finishes (or skipped) - advance
 		a.playlist.ensure()
 		a.playlist.advance()
 	}

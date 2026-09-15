@@ -103,12 +103,10 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("[live %s] incoming method=%s remote=%s contentLength=%d", s.ID, r.Method, r.RemoteAddr, r.ContentLength)
-	// Debug: dump headers (could gate behind env flag later)
 	for k, v := range r.Header {
 		log.Printf("[live %s] hdr %s=%q", s.ID, k, strings.Join(v, ", "))
 	}
 
-	// Auth
 	if err := s.checkIcecastAuth(r); err != nil {
 		log.Printf("[live %s] auth failed: %v", s.ID, err)
 		w.Header().Set("WWW-Authenticate", `Basic realm="source"`)
@@ -259,7 +257,6 @@ func parseIceAudioInfo(raw string) map[string]string {
 	return out
 }
 
-// Live metadata helpers
 func extractLiveMeta(r *http.Request) LiveMeta {
 	audioInfo := parseIceAudioInfo(r.Header.Get("Ice-Audio-Info"))
 

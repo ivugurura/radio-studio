@@ -83,7 +83,6 @@ type Studio struct {
 	liveIngest io.ReadCloser
 	liveActive atomic.Bool
 
-	// In Studio struct
 	liveMetaMu sync.RWMutex
 	liveMeta   *LiveMeta
 
@@ -99,7 +98,6 @@ type Studio struct {
 	streamListeners map[*streamListener]struct{}
 	listenersStore  *listeners.Store
 
-	// snapshot
 	snapshotMu       sync.RWMutex
 	lastSnapshot     StudioSnapshot
 	snapshotInterval time.Duration
@@ -127,7 +125,6 @@ func NewStudio(id string, dir string, brKbps, srHz, ch int, geoR *geo.Resolver, 
 		stop:             make(chan struct{}),
 	}
 
-	// Start distributor, switcher, and AutoDJ
 	go s.distribute()
 	go s.switcherLoop()
 	if autoDJF != nil {
@@ -230,13 +227,9 @@ func (s *Studio) switcherLoop() {
 				liveFrameReceived = false
 			}
 
-			// Forward to feed if either:
-			// 1. Live is not active, OR
-			// 2. Live is marked active but we haven't received the first frame yet
 			if !s.liveActive.Load() || !liveFrameReceived {
 				s.push(autodjChunk)
 			}
-			// If live is active and we have received frames, drop AutoDJ data
 
 		case liveChunk = <-s.liveFeed:
 			// Discard buffered live frames once the session ends; forwarding them
@@ -321,7 +314,6 @@ func (s *Studio) distribute() {
 				}
 			}
 			ls.l.ByteSent.Add(int64(len(data)))
-			// Heartbeat update every ~5s
 			if hb := ls.l.LastHeartbeat.Load(); hb != nil {
 				if time.Since(*hb) > 5*time.Second {
 					now := time.Now()
@@ -365,7 +357,6 @@ func (s *Studio) HandleListen(w http.ResponseWriter, r *http.Request) {
 	l.LastHeartbeat.Store(&now)
 	s.listenersStore.Add(l)
 
-	// Enrich asynchronously (non-blocking)
 	go s.geoResolver.Enrich(l)
 
 	sl := &streamListener{
@@ -398,7 +389,6 @@ func (s *Studio) HandleListen(w http.ResponseWriter, r *http.Request) {
 
 // Example status endpoint (extend with richer JSON / metrics).
 func (s *Studio) HandleStatus(w http.ResponseWriter, r *http.Request) {
-	// Simple plain text (replace with JSON if you add a JSON encoder)
 	s.listenersMu.RLock()
 	listenerCount := len(s.streamListeners)
 	s.listenersMu.RUnlock()

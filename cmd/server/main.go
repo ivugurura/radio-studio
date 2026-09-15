@@ -65,7 +65,6 @@ func main() {
 		stream.WithSnapshotInterval(cfg.SnapshotInterval),
 	}
 
-	// If playlist URL is configured, use backend-driven AutoDJ
 	if cfg.BackendAPI != "" {
 		opts = append(opts, stream.WithAutoDJFactory(func(dir string, studioID string, bitrate int, push func([]byte)) stream.AutoDJ {
 			studioEndpoint := cfg.BackendAPI + "/studios/" + studioID
@@ -82,7 +81,6 @@ func main() {
 	s1 := manager.RegisterStudio("reformation-rw")
 	// manager.RegisterStudio("reformation-congo")
 
-	// Start analytics sync if configured
 	if cfg.BackendAPI != "" {
 		backendIngestURL := cfg.BackendAPI + "/studios/" + s1.ID + "/listener-events"
 		s1.StartAnalytics(backendIngestURL, cfg.BackendAPIKey, cfg.EventFlushInterval)
@@ -98,7 +96,6 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/studios/", netutil.WithCORS(manager.RouteStudioRequest, cfg.AllowedOrigins))
 
-	// optional monitoring
 	stopMon := make(chan struct{})
 	// manager.StartMonitor(30*time.Second, stopMon)
 
