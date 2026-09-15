@@ -1,41 +1,50 @@
-# Go Streaming Server (Minimal Skeleton)
+# Radio Studio
+
+A lightweight Go streaming server for the [Ivugurura](https://github.com/ivugurura) radio platform. It sits between an audio encoder and listeners, relaying live broadcasts in real time and falling back to a scheduled playlist when no live source is connected.
+
+It is one of three services that make up the platform:
+
+| Service                                                 | Role                                                           |
+| ------------------------------------------------------- | -------------------------------------------------------------- |
+| **radio-studio** _(this repo)_                          | Streaming server — live ingest and audio delivery to listeners |
+| [radio-api](https://github.com/ivugurura/radio-backend) | Application backend — auth, studios, media pipeline, analytics |
+| [radio-ui](https://github.com/ivugurura/radio-frontend) | Web dashboard consumed by station staff                        |
 
 ## Features
 
-- Multi-studio support: `/studios/{studioID}/live` and `/studios/{studioID}/listen`
-- Live stream ingest endpoint (for use with encoders like BUTT)
-- Listener endpoint (streams live audio to listeners)
-- Modular, ready for further dashboard/API integration
-- External modules are tracked in `go.mod` and `go.sum` for reproducible builds
-- GeoIP enrichment is optional and disabled unless configured in `internal/geo`
+- **Multi-studio streaming** — each studio is served independently, isolating one broadcast from another
+- **Live ingest** — accepts a source connection from standard streaming encoders
+- **AutoDJ fallback** — seamlessly switches to a rotation playlist when a studio has no live source connected
+- **Listener delivery** — serves the active audio stream to any standard audio client
+- **Listener analytics** — tracks session and playback activity and forwards it to the backend for reporting
+- **Optional GeoIP enrichment** of listener sessions, disabled by default
+- **Built for reproducible builds** — dependencies are version-locked
 
-## Usage
+## Tech Stack
 
-1. Build and run the server:
+- Go
 
-   ```bash
-   go run cmd/server/main.go
-   ```
+## Requirements
 
-2. If you change dependencies, commit both `go.mod` and `go.sum` so CI and deploy builds stay in sync.
+Running the server requires a Go toolchain compatible with the version pinned in `go.mod`, network access to the backend API it reports analytics to, and — if enabling GeoIP — a local GeoIP database.
 
-3. To start streaming live audio to a studio (from BUTT, etc):
+## Getting Started
 
-    - For BUTT's Icecast `SOURCE` protocol, point the encoder directly to the
-       Studio service port, not an HTTP reverse proxy:
-       `http://your-server:7080/studios/reformation-rw/live`
-    - `SOURCE` is an HTTP/1.0, connection-delimited upload. A normal HTTP
-       reverse proxy can classify it as bodyless because it has neither
-       `Content-Length` nor chunked transfer encoding.
-    - Encoders that use standard `POST` or `PUT` may be proxied normally.
+At a high level:
 
-4. To listen to a stream:
+1. Provide the server with its configuration (listen address, audio storage location, backend integration details) via environment variables — see `config/config.go` for what's read.
+2. Build and run the server binary.
+3. Point a streaming encoder at a studio's ingest path to go live; when no encoder is connected, the configured fallback track plays automatically.
+4. Point any audio client at a studio's listen path to tune in.
 
-   - Connect your audio player to:  
-     `http://your-server:7080/studios/studio1/listen` (GET)
+Encoder compatibility varies: some streaming protocols use a connection style that doesn't play well with a typical HTTP reverse proxy sitting in front of the server, so ingest traffic is generally best routed directly to the service.
 
-## Next Steps
+Load-testing utilities and deployment reference material are available under `cmd/loadtest` and [deploy/](deploy/) respectively.
 
-- Implement playlist/AutoDJ fallback in `internal/stream/autodj.go`
-- Add authentication, admin endpoints, and dashboard integration (when ready)
-- Add more robust error handling and logging
+## License
+
+Licensed under the terms in [LICENSE](LICENSE).
+
+## Maintainer
+
+[Jean d'Amour AKIMANIZANYE](https://github.com/AJAkimana)
