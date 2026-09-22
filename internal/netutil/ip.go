@@ -9,8 +9,8 @@ import (
 func ExtractClientIp(r *http.Request) net.IP {
 	xff := r.Header.Get("X-Forwarded-For")
 	if xff != "" {
-		parts := strings.SplitSeq(xff, ",")
-		for p := range parts {
+		parts := strings.Split(xff, ",")
+		for _, p := range parts {
 			ip := net.ParseIP(strings.TrimSpace(p))
 			if ip != nil {
 				return ip
