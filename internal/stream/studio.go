@@ -430,9 +430,18 @@ func (s *Studio) HandleNowPlaying(w http.ResponseWriter, r *http.Request) {
 	netutil.ServerResponse(w, 200, "Success", resp)
 }
 
+// HandleSkip skips the track AutoDJ is currently playing.
 func (s *Studio) HandleSkip(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		netutil.ServerResponse(w, http.StatusMethodNotAllowed, "Method not allowed", nil)
+		return
+	}
 	if s.autoDJ == nil {
 		netutil.ServerResponse(w, 400, "AutoDJ not active", nil)
+		return
+	}
+	if s.liveActive.Load() {
+		netutil.ServerResponse(w, http.StatusConflict, "Live source is on air", nil)
 		return
 	}
 	s.autoDJ.Skip()

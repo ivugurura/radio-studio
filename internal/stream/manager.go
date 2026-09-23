@@ -203,6 +203,12 @@ func (m *Manager) RouteStudioRequest(w http.ResponseWriter, r *http.Request) {
 		netutil.ServerResponse(w, 404, "Studio not found", nil)
 		return
 	}
+	if m.validator != nil {
+		if err := m.validator(r, studioID, action); err != nil {
+			netutil.ServerResponse(w, http.StatusUnauthorized, err.Error(), nil)
+			return
+		}
+	}
 
 	switch action {
 	case "live":

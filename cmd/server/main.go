@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
+	"errors"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	// Registered on http.DefaultServeMux by their init funcs (expvar ->
@@ -21,12 +24,8 @@ import (
 	"github.com/joho/godotenv"
 )
 
-// streamingConfigRefreshInterval is how often live-ingest credentials are
-// re-fetched, so a password rotated in the admin UI needs no redeploy.
 const streamingConfigRefreshInterval = 5 * time.Minute
 
-// loadStreamingCredentials fetches and applies one studio's credentials,
-// logging rather than failing on error.
 func loadStreamingCredentials(s *stream.Studio, backendAPI, backendAPIKey string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -39,8 +38,6 @@ func loadStreamingCredentials(s *stream.Studio, backendAPI, backendAPIKey string
 	log.Printf("streaming config: loaded credentials for studio %s (user=%s)", s.ID, cfg.Username)
 }
 
-// startStreamingCredentialRefresh loads credentials immediately, then on
-// streamingConfigRefreshInterval for as long as the process runs.
 func startStreamingCredentialRefresh(s *stream.Studio, backendAPI, backendAPIKey string) {
 	loadStreamingCredentials(s, backendAPI, backendAPIKey)
 	go func() {
@@ -50,6 +47,23 @@ func startStreamingCredentialRefresh(s *stream.Studio, backendAPI, backendAPIKey
 			loadStreamingCredentials(s, backendAPI, backendAPIKey)
 		}
 	}()
+}
+
+// backendOnlyActions are control actions only the backend may trigger; the
+// admin UI goes through the backend, which authorizes the user first.
+var backendOnlyActions = map[string]bool{"skip": true}
+
+func requireBackendToken(apiKey string) stream.RequestValidator {
+	return func(r *http.Request, studioID, action string) error {
+		if !backendOnlyActions[action] {
+			return nil
+		}
+		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if !ok || apiKey == "" || subtle.ConstantTimeCompare([]byte(token), []byte(apiKey)) != 1 {
+			return errors.New("Not authorized")
+		}
+		return nil
+	}
 }
 
 func main() {
@@ -63,6 +77,7 @@ func main() {
 		stream.WithDefaultSr(cfg.DefaultSrHz),
 		stream.WithDefaultCh(cfg.DefaultCh),
 		stream.WithSnapshotInterval(cfg.SnapshotInterval),
+		stream.WithRequestValidator(requireBackendToken(cfg.BackendAPIKey)),
 	}
 
 	if cfg.BackendAPI != "" {
