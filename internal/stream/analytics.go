@@ -64,7 +64,9 @@ func (b *bucketState) addSample(now time.Time, active int, countries map[string]
 		// ListenerMinutes are not accrued here; accrueListenerMinutes adds them
 		// separately using the actual elapsed time since the last flush.
 		for c, n := range countries {
-			bkt.Countries[c] += n
+			if n > bkt.Countries[c] {
+				bkt.Countries[c] = n
+			}
 		}
 	}
 }
@@ -85,6 +87,7 @@ func (b *bucketState) drainReady(cutoff time.Time) []analytics.ListenerBucket {
 				dur = time.Hour
 			}
 			if start.Add(dur).Before(cutoff) || start.Add(dur).Equal(cutoff) {
+				bkt.ListenerMinutes = int(bkt.ListenerSeconds/60 + 0.5)
 				out = append(out, *bkt)
 				delete(mm, start)
 			}
@@ -97,21 +100,12 @@ func (b *bucketState) accrueListenerMinutes(delta time.Duration, active int) {
 	if active <= 0 || delta <= 0 {
 		return
 	}
-	minutes := int(delta.Minutes() + 0.5)
-	if minutes <= 0 {
-		return
-	}
+	secs := delta.Seconds() * float64(active)
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	for key, mm := range b.data {
+	for _, mm := range b.data {
 		for _, bkt := range mm {
-			if key == "MINUTE" {
-				bkt.ListenerMinutes += minutes * active
-			} else if key == "FIVE_MIN" {
-				bkt.ListenerMinutes += minutes * active
-			} else if key == "HOUR" {
-				bkt.ListenerMinutes += minutes * active
-			}
+			bkt.ListenerSeconds += secs
 		}
 	}
 }

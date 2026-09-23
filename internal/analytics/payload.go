@@ -22,7 +22,10 @@ type ListenerBucket struct {
 	BucketStart     time.Time      `json:"bucket_start"`
 	ActivePeak      int            `json:"active_peak"`
 	ListenerMinutes int            `json:"listener_minutes"`
-	Countries       map[string]int `json:"countries"`
+	Countries       map[string]int `json:"countries_json"`
+	// ListenerSeconds accumulates sub-minute listening time between flushes;
+	// it is converted to ListenerMinutes when the bucket is drained.
+	ListenerSeconds float64 `json:"-"`
 }
 
 type IngestListenerBatch struct {
