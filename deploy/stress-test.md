@@ -20,14 +20,17 @@ Tools in this repo:
 - One goroutine, one ~8 s buffered channel (~128 KB at 128 kbps), one socket per
   listener. A single `distribute()` goroutine per studio fans every ~4 KB chunk
   (~4/s) out to all listeners.
-- **Slow-listener eviction** (`internal/stream/studio.go`) only fires after 50
-  *consecutive* undelivered chunks — i.e. a listener that reads essentially
-  nothing for ~13 s. A merely-slow listener is not evicted; it just falls
-  behind. So the leading health signal is **per-connection throughput**
-  (`perconn_min_kbps`), and server-side drops (`close_ended`) are the confirming
-  signal once the box is genuinely overloaded.
-- No `WriteTimeout`, no listener cap, no auth on `/listen`. The server will keep
-  accepting connections until it runs out of CPU, RAM, or file descriptors.
+- **Slow listeners.** `distribute()` never blocks: if a listener's buffer is
+  full, its backlog is dropped and it resumes at the live edge (a "resync" — one
+  audible glitch, latency back to ~0). A listener that resyncs 5 times within
+  60 s is evicted (`internal/stream/studio.go`). Every socket write also has a
+  10 s deadline, so a client that stops reading entirely is cut off once its
+  kernel buffers fill (tens of seconds to minutes at 16 KB/s, depending on socket buffer sizes) and its goroutine,
+  socket and listener entry are released. The leading health signal is still
+  **per-connection throughput** (`perconn_min_kbps`); server-side drops
+  (`close_ended`) confirm the box is genuinely overloaded.
+- No listener cap and no auth on `/listen`. The server will keep accepting
+  connections until it runs out of CPU, RAM, or file descriptors.
 - The audio source is always present: with no backend playlist and no
   `DEFAULT_TRACK_FILE`, AutoDJ loops an embedded silent MP3 paced at the
   configured bitrate. So `/listen` emits a steady ~16 KB/s stream with zero
@@ -211,6 +214,7 @@ to `deploy/command.md` so ops has a reference.
 | `-rate` | 16000 | per-conn drain rate, bytes/s (128 kbps) |
 | `-drain` | realtime | `realtime` = pace to `-rate`; `fast` = read flat out (pure conn/throughput capacity) |
 | `-spawn-delay` | 2ms | gap between dials while spawning |
+| `-stall-pct` | 0 | % of listeners that connect and never read (slow-listener cleanup test) |
 | `-out` | — | CSV of progress rows |
 | `-insecure` | false | skip TLS verification |
 
@@ -232,3 +236,19 @@ k6 drains as fast as it can (no real-time pacing), so it measures connection and
 throughput capacity, not player-accurate underrun. Thresholds fail the run if
 `http_req_failed > 1%` or any short read (`listen_underruns`) occurs. Treat
 `cmd/loadtest -drain=realtime` as authoritative for the capacity number.
+
+## Slow-listener cleanup check
+
+Verifies stalled clients are eventually released instead of lingering as ghost
+listeners:
+
+```sh
+go run ./cmd/loadtest -url http://127.0.0.1:7080/studios/reformation-rw/listen \
+  -start 100 -step 0 -max 100 -hold 8m -stall-pct 20
+```
+
+Pass = healthy listeners keep ~15.8 KB/s throughout, and the server's
+`listeners_count` (`/status`) and goroutine count fall from 100 to ~80 once
+the stalled clients' kernel buffers fill (~45 s on loopback), with matching
+`evicted slow listener` / `listener disconnected` log lines. The stalled
+clients themselves are excluded from the loadtest's failure signals.
