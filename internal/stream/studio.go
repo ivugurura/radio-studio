@@ -2,6 +2,7 @@ package stream
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log"
 	"net/http"
@@ -42,14 +43,83 @@ type studioStatus struct {
 }
 
 type streamListener struct {
-	l             *listeners.Listener
-	ch            chan []byte
-	droppedInARow int
-	closeOnce     sync.Once
+	l         *listeners.Listener
+	ch        chan []byte
+	evicted   chan struct{}
+	evictOnce sync.Once
+
+	// resyncs holds the times this listener's buffer overflowed. Only the
+	// distribute goroutine touches it.
+	resyncs []time.Time
 }
 
-func (sl *streamListener) closeCh() {
-	sl.closeOnce.Do(func() { close(sl.ch) })
+func newStreamListener(l *listeners.Listener, capacity int) *streamListener {
+	return &streamListener{
+		l:       l,
+		ch:      make(chan []byte, capacity),
+		evicted: make(chan struct{}),
+	}
+}
+
+func (sl *streamListener) evict() {
+	sl.evictOnce.Do(func() { close(sl.evicted) })
+}
+
+type offerResult int
+
+const (
+	offerOK offerResult = iota
+	offerResynced
+	offerEvict
+)
+
+const (
+	// defaultListenerWriteTimeout bounds a single write to a listener's socket.
+	// A client that accepts nothing for this long is treated as gone.
+	defaultListenerWriteTimeout = 10 * time.Second
+
+	// A listener whose buffer overflows is skipped forward to the live edge
+	// (a "resync"). Too many resyncs in the window means it can't keep up.
+	maxListenerResyncs   = 5
+	listenerResyncWindow = 60 * time.Second
+)
+
+// offer hands a chunk to the listener without ever blocking the caller. When
+// the buffer is full it discards the whole backlog and resumes at the live
+// edge: one glitch instead of scattered gaps, and the listener's latency drops
+// back to near zero. Only the distribute goroutine may call it.
+func (sl *streamListener) offer(data []byte, now time.Time) offerResult {
+	select {
+	case sl.ch <- data:
+		return offerOK
+	default:
+	}
+
+	for drained := false; !drained; {
+		select {
+		case <-sl.ch:
+		default:
+			drained = true
+		}
+	}
+
+	cutoff := now.Add(-listenerResyncWindow)
+	kept := sl.resyncs[:0]
+	for _, t := range sl.resyncs {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	sl.resyncs = append(kept, now)
+	if len(sl.resyncs) >= maxListenerResyncs {
+		return offerEvict
+	}
+
+	select {
+	case sl.ch <- data:
+	default:
+	}
+	return offerResynced
 }
 
 const audioChunkSize = 4096
@@ -97,6 +167,7 @@ type Studio struct {
 	listenersMu     sync.RWMutex
 	streamListeners map[*streamListener]struct{}
 	listenersStore  *listeners.Store
+	writeTimeout    time.Duration
 
 	snapshotMu       sync.RWMutex
 	lastSnapshot     StudioSnapshot
@@ -119,6 +190,7 @@ func NewStudio(id string, dir string, brKbps, srHz, ch int, geoR *geo.Resolver, 
 		liveFeed:         make(chan []byte, queueCapacity(brKbps, 2)),
 		feed:             make(chan []byte, queueCapacity(brKbps, 2)),
 		listenersStore:   listeners.NewStore(),
+		writeTimeout:     defaultListenerWriteTimeout,
 		streamListeners:  make(map[*streamListener]struct{}),
 		geoResolver:      geoR,
 		snapshotInterval: snapIn,
@@ -297,41 +369,52 @@ func (s *Studio) Snapshot() StudioSnapshot {
 
 func (s *Studio) distribute() {
 	log.Printf("Studio %s: distributer started", s.ID)
+	var evictees []*streamListener
 	for data := range s.feed {
+		now := time.Now()
 		s.listenersMu.RLock()
 		for ls := range s.streamListeners {
-			select {
-			case ls.ch <- data:
-				ls.droppedInARow = 0
-			default:
-				ls.droppedInARow++
-				if ls.droppedInARow > 50 {
-					ls.closeCh()
-					s.listenersMu.RUnlock()
-					s.removeListener(ls)
-					s.listenersMu.RLock()
-					log.Printf("Studio %s: dropped slow listener id=%s droppedInARow=%d", s.ID, ls.l.ID, ls.droppedInARow)
-				}
-			}
-			ls.l.ByteSent.Add(int64(len(data)))
-			if hb := ls.l.LastHeartbeat.Load(); hb != nil {
-				if time.Since(*hb) > 5*time.Second {
-					now := time.Now()
-					ls.l.LastHeartbeat.Store(&now)
-				}
+			if ls.offer(data, now) == offerEvict {
+				evictees = append(evictees, ls)
 			}
 		}
 		s.listenersMu.RUnlock()
+
+		if len(evictees) > 0 {
+			s.listenersMu.Lock()
+			for _, ls := range evictees {
+				delete(s.streamListeners, ls)
+			}
+			s.listenersMu.Unlock()
+			for _, ls := range evictees {
+				ls.evict()
+				log.Printf("Studio %s: evicted slow listener id=%s (%d resyncs in %s)", s.ID, ls.l.ID, len(ls.resyncs), listenerResyncWindow)
+			}
+			clear(evictees)
+			evictees = evictees[:0]
+		}
 	}
 	log.Printf("Studio %s: distributor stopped", s.ID)
 }
 
 // HandleListen streams audio (live or AutoDJ) to a listener.
 func (s *Studio) HandleListen(w http.ResponseWriter, r *http.Request) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
-		return
+	rc := http.NewResponseController(w)
+
+	// Every write gets its own deadline: a stalled client must not pin this
+	// goroutine, its socket and its listener-store entry forever. The deadline
+	// is per write, so the infinite stream itself is never cut off.
+	write := func(data []byte) (int, error) {
+		if err := rc.SetWriteDeadline(time.Now().Add(s.writeTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			return 0, err
+		}
+		return w.Write(data)
+	}
+	flush := func() error {
+		if err := rc.SetWriteDeadline(time.Now().Add(s.writeTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			return err
+		}
+		return rc.Flush()
 	}
 
 	w.Header().Set("Content-Type", "audio/mpeg")
@@ -340,7 +423,12 @@ func (s *Studio) HandleListen(w http.ResponseWriter, r *http.Request) {
 	// Do NOT set Accept-Ranges: an infinite stream is not seekable.
 	// Do NOT manually set Transfer-Encoding; Go will add chunked automatically.
 	w.WriteHeader(http.StatusOK)
-	flusher.Flush() // send headers immediately so the client doesn't stall on initial connect
+	if err := flush(); err != nil { // send headers immediately so the client doesn't stall on initial connect
+		if errors.Is(err, http.ErrNotSupported) {
+			log.Printf("Studio %s: streaming unsupported by response writer", s.ID)
+		}
+		return
+	}
 
 	id := uuid.NewString()
 	ip := netutil.ExtractClientIp(r)
@@ -359,10 +447,7 @@ func (s *Studio) HandleListen(w http.ResponseWriter, r *http.Request) {
 
 	go s.geoResolver.Enrich(l)
 
-	sl := &streamListener{
-		l:  l,
-		ch: make(chan []byte, queueCapacity(s.bitrateKbps, 8)),
-	}
+	sl := newStreamListener(l, queueCapacity(s.bitrateKbps, 8))
 	s.listenersMu.Lock()
 	s.streamListeners[sl] = struct{}{}
 	total := len(s.streamListeners)
@@ -371,19 +456,42 @@ func (s *Studio) HandleListen(w http.ResponseWriter, r *http.Request) {
 
 	defer func() {
 		l.MarkDisconnected()
-		s.listenersMu.Lock()
-		delete(s.streamListeners, sl)
-		s.listenersMu.Unlock()
+		s.removeListener(sl)
 		s.listenersStore.Remove(l.ID)
-		sl.closeCh()
 		log.Printf("Studio %s: listener disconnected", s.ID)
 	}()
 
-	for data := range sl.ch {
-		if _, err := w.Write(data); err != nil {
-			break
+	ctx := r.Context()
+	for {
+		select {
+		case data := <-sl.ch:
+			n, err := write(data)
+			if n > 0 {
+				l.ByteSent.Add(int64(n))
+				touchHeartbeat(l)
+			}
+			if err != nil {
+				return
+			}
+			if err := flush(); err != nil {
+				return
+			}
+		case <-sl.evicted:
+			return
+		case <-ctx.Done():
+			return
+		case <-s.stop:
+			return
 		}
-		flusher.Flush()
+	}
+}
+
+// touchHeartbeat records that bytes reached the client. It is throttled so a
+// ~4 chunk/s stream does not allocate a timestamp per write.
+func touchHeartbeat(l *listeners.Listener) {
+	if hb := l.LastHeartbeat.Load(); hb == nil || time.Since(*hb) > 5*time.Second {
+		now := time.Now()
+		l.LastHeartbeat.Store(&now)
 	}
 }
 
