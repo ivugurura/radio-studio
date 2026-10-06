@@ -52,6 +52,7 @@ type config struct {
 	reportEvery  time.Duration
 	out          string
 	insecure     bool
+	stallPct     int
 }
 
 func parseFlags() config {
@@ -70,6 +71,7 @@ func parseFlags() config {
 	flag.DurationVar(&cfg.dialTimeout, "dial-timeout", 10*time.Second, "TCP dial + response-header timeout")
 	flag.DurationVar(&cfg.reportEvery, "report-every", 5*time.Second, "progress report / CSV row interval")
 	flag.StringVar(&cfg.out, "out", "", "optional CSV output file for progress rows")
+	flag.IntVar(&cfg.stallPct, "stall-pct", 0, "percent (0-100) of listeners that connect and then never read, to exercise slow-listener eviction")
 	flag.BoolVar(&cfg.insecure, "insecure", false, "skip TLS certificate verification")
 	flag.Parse()
 
@@ -85,6 +87,10 @@ func parseFlags() config {
 		cfg.realtime = false
 	default:
 		fmt.Fprintf(os.Stderr, "loadtest: invalid -drain %q (want realtime|fast)\n", drain)
+		os.Exit(2)
+	}
+	if cfg.stallPct < 0 || cfg.stallPct > 100 {
+		fmt.Fprintf(os.Stderr, "loadtest: invalid -stall-pct %d (want 0-100)\n", cfg.stallPct)
 		os.Exit(2)
 	}
 	if cfg.max < cfg.start {
@@ -106,6 +112,7 @@ type stats struct {
 	connected    atomic.Int64 // currently streaming
 	connectErrs  atomic.Int64
 	earlyClosed  atomic.Int64
+	stalled      atomic.Int64 // listeners deliberately left unread (-stall-pct)
 	closeEnded   atomic.Int64 // clean EOF mid-test => server ended the stream (eviction / shutdown)
 	closeReset   atomic.Int64 // connection reset / unexpected EOF
 	closeOther   atomic.Int64
@@ -177,6 +184,12 @@ func (p *pacer) consume(n int) {
 	}
 }
 
+// isStalled spreads pct% of listener ids evenly (ids start at 1), so small
+// runs still get the requested share.
+func isStalled(id int64, pct int) bool {
+	return id*int64(pct)/100 > (id-1)*int64(pct)/100
+}
+
 func worker(ctx context.Context, id int64, cfg config, client *http.Client, st *stats) {
 	cs := &connStat{}
 	st.register(id, cs)
@@ -200,6 +213,15 @@ func worker(ctx context.Context, id int64, cfg config, client *http.Client, st *
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		st.connectErrs.Add(1)
+		return
+	}
+
+	if isStalled(id, cfg.stallPct) {
+		// Hold the connection open without reading. Excluded from throughput and
+		// failure signals; watch the server's listeners_count / goroutines drop.
+		st.unregister(id)
+		st.stalled.Add(1)
+		<-ctx.Done()
 		return
 	}
 
@@ -548,6 +570,9 @@ func main() {
 	fmt.Fprintf(os.Stderr, "loadtest: %s | start=%d step=%d/%s max=%d hold=%s drain=%s rate=%d B/s\n",
 		cfg.url, cfg.start, cfg.step, cfg.stepInterval, cfg.max, cfg.hold,
 		map[bool]string{true: "realtime", false: "fast"}[cfg.realtime], cfg.rate)
+	if cfg.stallPct > 0 {
+		fmt.Fprintf(os.Stderr, "loadtest: %d%% of listeners will connect and never read\n", cfg.stallPct)
+	}
 
 	current := 0
 	first := cfg.start
@@ -605,6 +630,9 @@ func printSummary(cfg config, st *stats, elapsed time.Duration) {
 	fmt.Fprintf(os.Stderr, "peak concurrent streams:  %d\n", st.maxConnected.Load())
 	fmt.Fprintf(os.Stderr, "intended peak:            %d\n", st.intended.Load())
 	fmt.Fprintf(os.Stderr, "connect errors:           %d\n", st.connectErrs.Load())
+	if cfg.stallPct > 0 {
+		fmt.Fprintf(os.Stderr, "stalled listeners:        %d (never read; excluded from signals)\n", st.stalled.Load())
+	}
 	fmt.Fprintf(os.Stderr, "dropped by server:        %d (ended=%d reset=%d other=%d)\n",
 		st.earlyClosed.Load(), st.closeEnded.Load(), st.closeReset.Load(), st.closeOther.Load())
 	intendedMBps := float64(st.intended.Load()) * float64(cfg.rate) / 1e6
