@@ -159,10 +159,13 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if r.Method == "SOURCE" {
-		// BUTT sends `SOURCE ... HTTP/1.0` without Content-Length or chunked
-		// framing. net/http therefore exposes r.Body as empty. Hijacking retains
-		// its buffered bytes and lets us read the connection-delimited audio.
+	expectContinue := strings.EqualFold(r.Header.Get("Expect"), "100-continue")
+
+	if r.Method == "SOURCE" || r.Body == http.NoBody {
+		// BUTT sends `PUT ... HTTP/1.1` (or `SOURCE ... HTTP/1.0` as a fallback)
+		// without Content-Length or chunked framing. net/http therefore exposes
+		// r.Body as empty. Hijacking retains its buffered bytes and lets us read
+		// the connection-delimited audio.
 		hijacker, ok := w.(http.Hijacker)
 		if !ok {
 			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
@@ -174,24 +177,25 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 			return
 		}
-		if _, err := readWriter.WriteString("HTTP/1.0 200 OK\r\nServer: Icecast 2.4.0\r\n\r\n"); err != nil {
+		ack := "HTTP/1.0 200 OK\r\nServer: Icecast 2.4.0\r\n\r\n"
+		if expectContinue {
+			ack = "HTTP/1.1 100 Continue\r\n\r\n"
+		}
+		if _, err := readWriter.WriteString(ack); err != nil {
 			_ = conn.Close()
-			log.Printf("[live %s] could not acknowledge SOURCE connection: %v", s.ID, err)
+			log.Printf("[live %s] could not acknowledge %s connection: %v", s.ID, r.Method, err)
 			return
 		}
 		if err := readWriter.Flush(); err != nil {
 			_ = conn.Close()
-			log.Printf("[live %s] could not flush SOURCE acknowledgement: %v", s.ID, err)
+			log.Printf("[live %s] could not flush %s acknowledgement: %v", s.ID, r.Method, err)
 			return
 		}
 		reader = &liveSourceReader{reader: readWriter.Reader, conn: conn}
 	} else {
 		reader = r.Body
-		if strings.EqualFold(r.Header.Get("Expect"), "100-continue") {
+		if expectContinue {
 			w.WriteHeader(http.StatusContinue)
-			if f, ok := w.(http.Flusher); ok {
-				f.Flush()
-			}
 			log.Printf("[live %s] sent 100-continue for %s", s.ID, r.Method)
 		}
 		if err := http.NewResponseController(w).EnableFullDuplex(); err != nil {
