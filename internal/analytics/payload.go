@@ -32,6 +32,9 @@ type IngestListenerBatch struct {
 	StudioID string            `json:"studio_id"`
 	Sessions []ListenerSession `json:"sessions"`
 	Buckets  []ListenerBucket  `json:"buckets"`
+	// ConnectedSessionIDs lists every listener connected at flush time, including
+	// those omitted from Sessions, so the backend can keep their last_seen fresh.
+	ConnectedSessionIDs []string `json:"connected_session_ids"`
 }
 
 type IngestPlayBatch struct {

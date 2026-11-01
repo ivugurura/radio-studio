@@ -151,8 +151,12 @@ func (s *Studio) StartAnalytics(ingestURL, apiKey string, flushEvery time.Durati
 
 			toSend := make([]analytics.ListenerSession, 0, len(sessions))
 			present := make(map[string]struct{}, len(sessions))
+			connectedIDs := make([]string, 0, len(sessions))
 			for _, sess := range sessions {
 				present[sess.ID] = struct{}{}
+				if sess.EndedAt == nil {
+					connectedIDs = append(connectedIDs, sess.ID)
+				}
 				prev, known := sentBytes[sess.ID]
 				if fullReconcile || !known || sess.EndedAt != nil ||
 					sess.TotalBytes-prev >= listenerResendDeltaBytes {
@@ -161,14 +165,15 @@ func (s *Studio) StartAnalytics(ingestURL, apiKey string, flushEvery time.Durati
 			}
 
 			buckets := bk.drainReady(now.Add(-1 * time.Second))
-			if len(toSend) == 0 && len(buckets) == 0 {
+			if len(toSend) == 0 && len(buckets) == 0 && len(connectedIDs) == 0 {
 				continue
 			}
 
 			batch := analytics.IngestListenerBatch{
-				StudioID: s.ID,
-				Sessions: toSend,
-				Buckets:  buckets,
+				StudioID:            s.ID,
+				Sessions:            toSend,
+				Buckets:             buckets,
+				ConnectedSessionIDs: connectedIDs,
 			}
 
 			// send but don't block streaming on errors
