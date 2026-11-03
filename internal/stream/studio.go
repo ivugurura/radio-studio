@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -452,13 +453,15 @@ func (s *Studio) HandleListen(w http.ResponseWriter, r *http.Request) {
 	s.streamListeners[sl] = struct{}{}
 	total := len(s.streamListeners)
 	s.listenersMu.Unlock()
-	log.Printf("Studio %s: new listener (total=%d)", s.ID, total)
+	log.Printf("Studio %s: new listener id=%s client=%s (total=%d)", s.ID, id, l.ClientType, total)
 
+	reason := "unknown"
 	defer func() {
 		l.MarkDisconnected()
 		s.removeListener(sl)
 		s.listenersStore.Remove(l.ID)
-		log.Printf("Studio %s: listener disconnected", s.ID)
+		log.Printf("Studio %s: listener disconnected id=%s client=%s reason=%s after=%s sent=%dB",
+			s.ID, id, l.ClientType, reason, time.Since(now).Round(time.Second), l.ByteSent.Load())
 	}()
 
 	ctx := r.Context()
@@ -471,19 +474,34 @@ func (s *Studio) HandleListen(w http.ResponseWriter, r *http.Request) {
 				touchHeartbeat(l)
 			}
 			if err != nil {
+				reason = disconnectReason("write", err)
 				return
 			}
 			if err := flush(); err != nil {
+				reason = disconnectReason("flush", err)
 				return
 			}
 		case <-sl.evicted:
+			reason = "evicted"
 			return
 		case <-ctx.Done():
+			// The client (or the proxy in front of us) closed the connection.
+			reason = "client-closed"
 			return
 		case <-s.stop:
+			reason = "studio-stopped"
 			return
 		}
 	}
+}
+
+// disconnectReason labels a failed write/flush to a listener. A deadline means
+// the client stopped reading for writeTimeout (e.g. a sleeping phone).
+func disconnectReason(op string, err error) string {
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return op + "-timeout"
+	}
+	return op + "-error: " + err.Error()
 }
 
 // touchHeartbeat records that bytes reached the client. It is throttled so a
