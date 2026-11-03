@@ -125,13 +125,22 @@ func (sl *streamListener) offer(data []byte, now time.Time) offerResult {
 
 const audioChunkSize = 4096
 
-// queueCapacity returns the number of audioChunkSize chunks needed to retain a
-// short amount of audio at the studio's configured bitrate.
-func queueCapacity(bitrateKbps, seconds int) int {
+// connectBurstSeconds of recent audio are sent to each new listener up front,
+// so its player starts with a buffer to ride out network jitter instead of
+// receiving only real-time audio and stalling on the first hiccup.
+const connectBurstSeconds = 4
+
+func bytesPerSecond(bitrateKbps int) int {
 	if bitrateKbps <= 0 {
 		bitrateKbps = 128
 	}
-	bytes := bitrateKbps * 1000 / 8 * seconds
+	return bitrateKbps * 1000 / 8
+}
+
+// queueCapacity returns the number of audioChunkSize chunks needed to retain a
+// short amount of audio at the studio's configured bitrate.
+func queueCapacity(bitrateKbps, seconds int) int {
+	bytes := bytesPerSecond(bitrateKbps) * seconds
 	return max(1, (bytes+audioChunkSize-1)/audioChunkSize)
 }
 
@@ -170,6 +179,12 @@ type Studio struct {
 	listenersStore  *listeners.Store
 	writeTimeout    time.Duration
 
+	// burst holds the most recent ~burstLimit bytes of the feed for new
+	// listeners. Guarded by listenersMu.
+	burst      [][]byte
+	burstBytes int
+	burstLimit int
+
 	snapshotMu       sync.RWMutex
 	lastSnapshot     StudioSnapshot
 	snapshotInterval time.Duration
@@ -192,6 +207,7 @@ func NewStudio(id string, dir string, brKbps, srHz, ch int, geoR *geo.Resolver, 
 		feed:             make(chan []byte, queueCapacity(brKbps, 2)),
 		listenersStore:   listeners.NewStore(),
 		writeTimeout:     defaultListenerWriteTimeout,
+		burstLimit:       bytesPerSecond(brKbps) * connectBurstSeconds,
 		streamListeners:  make(map[*streamListener]struct{}),
 		geoResolver:      geoR,
 		snapshotInterval: snapIn,
@@ -373,20 +389,22 @@ func (s *Studio) distribute() {
 	var evictees []*streamListener
 	for data := range s.feed {
 		now := time.Now()
-		s.listenersMu.RLock()
+		// Write lock: the burst update and the fan-out must be atomic with
+		// respect to HandleListen, or a new listener could get a chunk twice.
+		// offer never blocks, so this stays short.
+		s.listenersMu.Lock()
+		s.rememberBurst(data)
 		for ls := range s.streamListeners {
 			if ls.offer(data, now) == offerEvict {
 				evictees = append(evictees, ls)
 			}
 		}
-		s.listenersMu.RUnlock()
+		for _, ls := range evictees {
+			delete(s.streamListeners, ls)
+		}
+		s.listenersMu.Unlock()
 
 		if len(evictees) > 0 {
-			s.listenersMu.Lock()
-			for _, ls := range evictees {
-				delete(s.streamListeners, ls)
-			}
-			s.listenersMu.Unlock()
 			for _, ls := range evictees {
 				ls.evict()
 				log.Printf("Studio %s: evicted slow listener id=%s (%d resyncs in %s)", s.ID, ls.l.ID, len(ls.resyncs), listenerResyncWindow)
@@ -396,6 +414,18 @@ func (s *Studio) distribute() {
 		}
 	}
 	log.Printf("Studio %s: distributor stopped", s.ID)
+}
+
+// rememberBurst appends data to the connect burst, dropping the oldest chunks
+// beyond burstLimit. Chunks are shared, never mutated. Caller holds listenersMu.
+func (s *Studio) rememberBurst(data []byte) {
+	s.burst = append(s.burst, data)
+	s.burstBytes += len(data)
+	for len(s.burst) > 1 && s.burstBytes-len(s.burst[0]) >= s.burstLimit {
+		s.burstBytes -= len(s.burst[0])
+		s.burst[0] = nil
+		s.burst = s.burst[1:]
+	}
 }
 
 // HandleListen streams audio (live or AutoDJ) to a listener.
@@ -450,6 +480,16 @@ func (s *Studio) HandleListen(w http.ResponseWriter, r *http.Request) {
 
 	sl := newStreamListener(l, queueCapacity(s.bitrateKbps, 8))
 	s.listenersMu.Lock()
+	// Prefill with the connect burst. Under the lock, so distribute can't
+	// slip a chunk in between. Use at most half the queue (small live-ingest
+	// chunks can outnumber its slots) and keep the newest audio.
+	burst := s.burst
+	if limit := cap(sl.ch) / 2; len(burst) > limit {
+		burst = burst[len(burst)-limit:]
+	}
+	for _, chunk := range burst {
+		sl.ch <- chunk
+	}
 	s.streamListeners[sl] = struct{}{}
 	total := len(s.streamListeners)
 	s.listenersMu.Unlock()

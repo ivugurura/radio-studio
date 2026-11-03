@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -36,6 +37,7 @@ type backendPlaylist struct {
 	lastFetch time.Time
 	ttl       time.Duration
 	client    *http.Client
+	fetching  atomic.Bool
 }
 
 type backendTrack struct {
@@ -54,7 +56,7 @@ func newBackendPlaylist(dir string, studioID string, endpoint string, apiKey str
 		endpoint: endpoint,
 		apiKey:   apiKey,
 		idx:      -1,
-		ttl:      5 * time.Second,
+		ttl:      15 * time.Second,
 		client:   &http.Client{Timeout: 5 * time.Second},
 	}
 }
@@ -100,13 +102,33 @@ func (b *backendPlaylist) fetch() {
 	b.lastFetch = time.Now()
 }
 
+// ensure keeps the playlist fresh without stalling the caller. The AutoDJ
+// calls it from its audio loop, where a blocking HTTP call is dead air for
+// every listener, so once a playlist is loaded a stale one is refreshed in the
+// background. Only the first load, with nothing to play yet, blocks.
 func (b *backendPlaylist) ensure() {
-	b.mu.RLock()
-	stale := len(b.tracks) == 0 || time.Since(b.lastFetch) > b.ttl
-	b.mu.RUnlock()
+	b.mu.Lock()
+	empty := len(b.tracks) == 0
+	stale := empty || time.Since(b.lastFetch) > b.ttl
+	if stale && !empty {
+		// Counts as an attempt even if the fetch fails, so a down backend is
+		// retried once per ttl instead of on every call.
+		b.lastFetch = time.Now()
+	}
+	b.mu.Unlock()
 
-	if stale {
+	if !stale {
+		return
+	}
+	if empty {
 		b.fetch()
+		return
+	}
+	if b.fetching.CompareAndSwap(false, true) {
+		go func() {
+			defer b.fetching.Store(false)
+			b.fetch()
+		}()
 	}
 }
 

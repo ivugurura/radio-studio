@@ -51,6 +51,67 @@ type autoDJ struct {
 	fallbackPath string
 
 	client *analytics.Client
+	// events queues play events for sendEvents, so backend latency never
+	// holds up the audio loop.
+	events chan analytics.IngestPlayBatch
+
+	// pace is only touched by the Play goroutine.
+	pace pacer
+}
+
+// maxPaceCatchUp bounds how far behind real time the AutoDJ may fall and still
+// catch up by sending faster. Past it (e.g. after a long stall) the clock is
+// rebased instead, so listeners never get a flood bigger than their queues.
+const maxPaceCatchUp = 2 * time.Second
+
+// pacer meters bytes out at the stream bitrate. One pacer spans every track,
+// so time lost between tracks is made up by briefly sending faster instead of
+// being taken out of every listener's buffer.
+type pacer struct {
+	bytesPerSec int
+	start       time.Time
+	sent        int64
+}
+
+// wait accounts for n bytes just sent and sleeps until they are due.
+func (p *pacer) wait(n int) {
+	now := time.Now()
+	if p.start.IsZero() {
+		p.start = now
+	}
+	p.sent += int64(n)
+	expected := time.Duration(float64(p.sent) / float64(p.bytesPerSec) * float64(time.Second))
+	elapsed := now.Sub(p.start)
+	if elapsed-expected > maxPaceCatchUp {
+		p.start = now.Add(-(expected + maxPaceCatchUp))
+		elapsed = expected + maxPaceCatchUp
+	}
+	if expected > elapsed {
+		time.Sleep(expected - elapsed)
+	}
+}
+
+// queueEvent hands a play event to sendEvents without blocking.
+func (a *autoDJ) queueEvent(ev analytics.IngestPlayBatch) {
+	select {
+	case a.events <- ev:
+	default:
+		log.Printf("autoDJ: play event queue full, dropping %s", ev.Type)
+	}
+}
+
+// sendEvents posts queued play events to the backend in order.
+func (a *autoDJ) sendEvents(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev := <-a.events:
+			if err := a.client.SendPlayerBatch(ctx, []analytics.IngestPlayBatch{ev}); err != nil {
+				log.Printf("autoDJ: sending %s event: %v", ev.Type, err)
+			}
+		}
+	}
 }
 
 func (a *autoDJ) lock() {
@@ -104,40 +165,39 @@ func NewAutoDJ(audioDir string, studioID string, bitrateKbps int, push func([]by
 		nowMu:        make(chan struct{}, 1),
 		fallbackPath: fallbackFile,
 		client:       analytics.NewClient(ingestEndpoint, apiKey),
+		events:       make(chan analytics.IngestPlayBatch, 64),
 	}
 }
 
-func (a *autoDJ) streamFile(ctx context.Context, path string, bytesPerSec, chunkSize int) error {
+func (a *autoDJ) streamFile(ctx context.Context, path string, chunkSize int) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return &TrackError{Path: path, Kind: "open", Err: err}
 	}
 	defer f.Close()
 
-	err = a.streamReader(ctx, f, path, bytesPerSec, chunkSize)
+	err = a.streamReader(ctx, f, path, chunkSize)
 	if err == nil {
-		a.client.SendPlayerBatch(ctx, []analytics.IngestPlayBatch{{
+		a.queueEvent(analytics.IngestPlayBatch{
 			Type:    "track_ended",
 			TrackID: a.current.ID,
 			File:    a.current.File,
 			Source:  "AUTO",
 			EndedAt: time.Now().UTC().Format(time.RFC3339),
-		}})
+		})
 	}
 	return err
 }
 
 // streamSilence loops a short embedded silent clip so an empty playlist produces
 // valid audio instead of dead air; it returns after ~1s so the caller can recheck the playlist.
-func (a *autoDJ) streamSilence(ctx context.Context, bytesPerSec, chunkSize int) error {
-	return a.streamReader(ctx, bytes.NewReader(silenceMP3), "", bytesPerSec, chunkSize)
+func (a *autoDJ) streamSilence(ctx context.Context, chunkSize int) error {
+	return a.streamReader(ctx, bytes.NewReader(silenceMP3), "", chunkSize)
 }
 
-// streamReader paces reads from r at bytesPerSec, pushing chunks to the studio feed.
+// streamReader paces reads from r at the stream bitrate, pushing chunks to the studio feed.
 // activeFile "" (used for silence) never matches a.activeFile, so a buffered skip is a no-op.
-func (a *autoDJ) streamReader(ctx context.Context, r io.Reader, activeFile string, bytesPerSec, chunkSize int) error {
-	start := time.Now()
-	var sent int64
+func (a *autoDJ) streamReader(ctx context.Context, r io.Reader, activeFile string, chunkSize int) error {
 	buf := make([]byte, chunkSize)
 
 	for {
@@ -166,12 +226,10 @@ func (a *autoDJ) streamReader(ctx context.Context, r io.Reader, activeFile strin
 			chunk := make([]byte, n)
 			copy(chunk, buf[:n])
 			a.push(chunk)
-			sent += int64(n)
-			expected := time.Duration(float64(sent) / float64(bytesPerSec) * float64(time.Second))
-			elapsed := time.Since(start)
-			if expected > elapsed {
-				time.Sleep(expected - elapsed)
-			}
+			a.pace.wait(n)
+			// Refresh mid-track (in the background), so the track boundary
+			// doesn't have to wait on the backend.
+			a.playlist.ensure()
 		}
 		if rerr != nil {
 			if rerr == io.EOF {
@@ -184,7 +242,7 @@ func (a *autoDJ) streamReader(ctx context.Context, r io.Reader, activeFile strin
 
 // attempt to stream the fallback track if configured and present.
 // returns true if it started streaming fallback, false otherwise.
-func (a *autoDJ) tryFallback(ctx context.Context, bytesPerSec, chunkSize int) bool {
+func (a *autoDJ) tryFallback(ctx context.Context, chunkSize int) bool {
 	if a.fallbackPath == "" {
 		return false
 	}
@@ -199,17 +257,17 @@ func (a *autoDJ) tryFallback(ctx context.Context, bytesPerSec, chunkSize int) bo
 	a.startedAt = time.Now()
 	a.activeFile = a.fallbackPath
 
-	a.client.SendPlayerBatch(ctx, []analytics.IngestPlayBatch{{
+	a.queueEvent(analytics.IngestPlayBatch{
 		Type:      "track_started",
 		TrackID:   a.current.ID,
 		File:      a.current.File,
 		Source:    "AUTO",
 		StartedAt: time.Now().UTC().Format(time.RFC3339),
-	}})
+	})
 
 	a.unlock()
 
-	err := a.streamFile(ctx, a.fallbackPath, bytesPerSec, chunkSize)
+	err := a.streamFile(ctx, a.fallbackPath, chunkSize)
 	if err != nil && !errors.Is(err, io.EOF) {
 		log.Printf("autoDJ: error streaming fallback %s: %v", a.fallbackPath, err)
 	}
@@ -223,6 +281,8 @@ func (a *autoDJ) Play(ctx context.Context) {
 	// 128 kbps => 16 KB/s
 	bytesPerSec := int(float64(a.bitrateKbps) * 1000.0 / 8.0)
 	chunkSize := audioChunkSize
+	a.pace = pacer{bytesPerSec: bytesPerSec}
+	go a.sendEvents(ctx)
 
 	for {
 		select {
@@ -238,10 +298,10 @@ func (a *autoDJ) Play(ctx context.Context) {
 				cur = c2
 				ok = true
 			} else {
-				if a.tryFallback(ctx, bytesPerSec, chunkSize) {
+				if a.tryFallback(ctx, chunkSize) {
 					continue
 				}
-				if err := a.streamSilence(ctx, bytesPerSec, chunkSize); err != nil && !errors.Is(err, context.Canceled) {
+				if err := a.streamSilence(ctx, chunkSize); err != nil && !errors.Is(err, context.Canceled) {
 					log.Printf("autoDJ: error streaming silence: %v", err)
 					time.Sleep(500 * time.Millisecond)
 				}
@@ -256,18 +316,18 @@ func (a *autoDJ) Play(ctx context.Context) {
 		a.startedAt = time.Now()
 		a.activeFile = cur.File
 
-		a.client.SendPlayerBatch(ctx, []analytics.IngestPlayBatch{{
+		a.queueEvent(analytics.IngestPlayBatch{
 			Type:      "track_started",
 			TrackID:   a.current.ID,
 			File:      a.current.File,
 			Source:    "AUTO",
 			StartedAt: time.Now().UTC().Format(time.RFC3339),
-		}})
+		})
 
 		a.unlock()
 
 		log.Printf("AudioDJ: playing %s", cur.Title)
-		if err := a.streamFile(ctx, cur.File, bytesPerSec, chunkSize); err != nil {
+		if err := a.streamFile(ctx, cur.File, chunkSize); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return
 			}
