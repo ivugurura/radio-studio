@@ -3,10 +3,13 @@ package stream
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -158,6 +161,10 @@ type Studio struct {
 	user     string
 	password string
 
+	// Station details sent to listeners as icy-* headers.
+	stationMu sync.RWMutex
+	station   stationInfo
+
 	// Live ingest (if present)
 	liveMu     sync.RWMutex
 	liveIngest io.ReadCloser
@@ -247,6 +254,62 @@ func (s *Studio) credentials() (string, string) {
 	s.credMu.RLock()
 	defer s.credMu.RUnlock()
 	return s.user, s.password
+}
+
+type stationInfo struct {
+	name, description, genre, url string
+}
+
+// maxStationDescriptionRunes keeps icy-description to a header-sized blurb.
+const maxStationDescriptionRunes = 256
+
+// cleanHeaderValue collapses whitespace (including newlines, which are not
+// allowed in a header value) and truncates to maxRunes when maxRunes > 0.
+func cleanHeaderValue(v string, maxRunes int) string {
+	v = strings.Join(strings.Fields(v), " ")
+	if r := []rune(v); maxRunes > 0 && len(r) > maxRunes {
+		v = strings.TrimSpace(string(r[:maxRunes-1])) + "…"
+	}
+	return v
+}
+
+// SetStationName updates the station name/description from the backend.
+// Safe to call repeatedly (e.g. from the streaming-config refresh).
+func (s *Studio) SetStationName(name, description string) {
+	s.stationMu.Lock()
+	s.station.name = cleanHeaderValue(name, 0)
+	s.station.description = cleanHeaderValue(description, maxStationDescriptionRunes)
+	s.stationMu.Unlock()
+}
+
+// SetStationLinks sets the station genre and website from config.
+func (s *Studio) SetStationLinks(genre, url string) {
+	s.stationMu.Lock()
+	s.station.genre = cleanHeaderValue(genre, 0)
+	s.station.url = cleanHeaderValue(url, 0)
+	s.stationMu.Unlock()
+}
+
+// writeStationHeaders adds the Icecast/SHOUTcast headers that players such as
+// VLC, car radios and directory apps show as the station's name and format.
+func (s *Studio) writeStationHeaders(h http.Header) {
+	s.stationMu.RLock()
+	info := s.station
+	s.stationMu.RUnlock()
+
+	for key, value := range map[string]string{
+		"icy-name":        info.name,
+		"icy-description": info.description,
+		"icy-genre":       info.genre,
+		"icy-url":         info.url,
+	} {
+		if value != "" {
+			h.Set(key, value)
+		}
+	}
+	h.Set("icy-br", strconv.Itoa(s.bitrateKbps))
+	h.Set("icy-sr", strconv.Itoa(s.srHz))
+	h.Set("ice-audio-info", fmt.Sprintf("ice-samplerate=%d;ice-bitrate=%d;ice-channels=%d", s.srHz, s.bitrateKbps, s.ch))
 }
 
 func (s *Studio) setLiveMeta(m LiveMeta) {
@@ -450,6 +513,7 @@ func (s *Studio) HandleListen(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "audio/mpeg")
 	w.Header().Set("Cache-Control", "no-cache, no-store")
+	s.writeStationHeaders(w.Header())
 	w.Header().Set("Connection", "keep-alive")
 	// Do NOT set Accept-Ranges: an infinite stream is not seekable.
 	// Do NOT manually set Transfer-Encoding; Go will add chunked automatically.

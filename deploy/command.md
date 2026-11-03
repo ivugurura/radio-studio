@@ -117,7 +117,13 @@ DEFAULT_SR_HZ=48000
 DEFAULT_CH=2
 DEFAULT_TRACK_FILE=<fallback-mp3-path>
 ALLOWED_ORIGINS=<comma-separated-browser-origins>
+STATION_GENRE=<icy-genre, e.g. Religion>
+STATION_URL=<icy-url, e.g. https://www.reformationvoice.org>
 ```
+
+The stream's `icy-name`/`icy-description` headers come from the studio's
+display name and description in the backend, refreshed with the
+streaming config below.
 
 Live-ingest username/password are no longer env vars — radio-studio fetches
 them from the backend (`GET /api/studios/<studio-id>/streaming-config`,

@@ -16,6 +16,9 @@ type StreamingConfig struct {
 	BitrateKbps  int    `json:"bitrate_kbps"`
 	SampleRateHz int    `json:"sample_rate_hz"`
 	Channels     int    `json:"channels"`
+
+	StationName        string `json:"station_name"`
+	StationDescription string `json:"station_description"`
 }
 
 var streamingConfigHTTPClient = &http.Client{Timeout: 5 * time.Second}

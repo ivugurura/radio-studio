@@ -32,6 +32,11 @@ type Config struct {
 
 	// Fallback track
 	DefaultTrackFile string
+
+	// Station details for the stream's icy-genre/icy-url headers. Name and
+	// description come from the backend per studio.
+	StationGenre string
+	StationURL   string
 }
 
 func LoadConfig() *Config {
@@ -59,6 +64,8 @@ func LoadConfig() *Config {
 		DefaultSrHz:        intEnv("DEFAULT_SR_HZ", 48000),
 		DefaultCh:          intEnv("DEFAULT_CH", 2),
 		DefaultTrackFile:   get("DEFAULT_TRACK_FILE", ""),
+		StationGenre:       get("STATION_GENRE", ""),
+		StationURL:         get("STATION_URL", ""),
 	}
 
 	return cfg

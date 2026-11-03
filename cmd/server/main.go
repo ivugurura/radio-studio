@@ -35,6 +35,7 @@ func loadStreamingCredentials(s *stream.Studio, backendAPI, backendAPIKey string
 		return
 	}
 	s.SetCredentials(cfg.Username, cfg.Password)
+	s.SetStationName(cfg.StationName, cfg.StationDescription)
 	log.Printf("streaming config: loaded credentials for studio %s (user=%s)", s.ID, cfg.Username)
 }
 
@@ -95,6 +96,7 @@ func main() {
 
 	s1 := manager.RegisterStudio("reformation-rw")
 	// manager.RegisterStudio("reformation-congo")
+	s1.SetStationLinks(cfg.StationGenre, cfg.StationURL)
 
 	if cfg.BackendAPI != "" {
 		backendIngestURL := cfg.BackendAPI + "/studios/" + s1.ID + "/listener-events"
