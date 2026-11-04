@@ -130,8 +130,17 @@ const audioChunkSize = 4096
 
 // connectBurstSeconds of recent audio are sent to each new listener up front,
 // so its player starts with a buffer to ride out network jitter instead of
-// receiving only real-time audio and stalling on the first hiccup.
-const connectBurstSeconds = 4
+// receiving only real-time audio and stalling on the first hiccup. It is sized
+// for mobile browsers, which play the stream through their native player
+// (<audio src>): those wait for several seconds of buffered audio before they
+// start, and anything the burst doesn't cover arrives only at real time, which
+// the user feels as a slow play button. The cost is that a listener hears
+// audio about this far behind the live edge.
+const connectBurstSeconds = 12
+
+// listenerHeadroomSeconds of free queue space each listener gets on top of the
+// connect burst, to absorb network jitter before it has to be resynced.
+const listenerHeadroomSeconds = 8
 
 func bytesPerSecond(bitrateKbps int) int {
 	if bitrateKbps <= 0 {
@@ -542,15 +551,13 @@ func (s *Studio) HandleListen(w http.ResponseWriter, r *http.Request) {
 
 	go s.geoResolver.Enrich(l)
 
-	sl := newStreamListener(l, queueCapacity(s.bitrateKbps, 8))
 	s.listenersMu.Lock()
 	// Prefill with the connect burst. Under the lock, so distribute can't
-	// slip a chunk in between. Use at most half the queue (small live-ingest
-	// chunks can outnumber its slots) and keep the newest audio.
+	// slip a chunk in between. The queue is sized from the burst's chunk
+	// count (small live-ingest chunks can outnumber a byte-based estimate),
+	// so the whole burst fits and the headroom stays free.
 	burst := s.burst
-	if limit := cap(sl.ch) / 2; len(burst) > limit {
-		burst = burst[len(burst)-limit:]
-	}
+	sl := newStreamListener(l, queueCapacity(s.bitrateKbps, listenerHeadroomSeconds)+len(burst))
 	for _, chunk := range burst {
 		sl.ch <- chunk
 	}
