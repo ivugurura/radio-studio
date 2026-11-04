@@ -153,16 +153,6 @@ func (m *Manager) Shutdown() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	log.Printf("Manager: shutting down (%d studios)", len(m.studios))
-	var wg sync.WaitGroup
-	for id, studio := range m.studios {
-		wg.Add(1)
-		go func(id string, st *Studio) {
-			defer wg.Done()
-			// st.Close()
-			log.Printf("Manager: studio %s closed", id)
-		}(id, studio)
-	}
-	wg.Wait()
 }
 
 // Example graceful shutdown hook usage:

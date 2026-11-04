@@ -52,11 +52,8 @@ func (a *autoDJ) saveState(t Track) {
 	if t.ID == "" {
 		return
 	}
-	data, err := json.Marshal(autoDJState{TrackID: t.ID, SavedAt: time.Now().UTC()})
-	if err != nil {
-		log.Printf("autoDJ: encoding state: %v", err)
-		return
-	}
+	// Marshalling a string and a time can't fail.
+	data, _ := json.Marshal(autoDJState{TrackID: t.ID, SavedAt: time.Now().UTC()})
 	tmp, err := os.CreateTemp(a.dir, autoDJStateFile+".*.tmp")
 	if err != nil {
 		log.Printf("autoDJ: saving state: %v", err)

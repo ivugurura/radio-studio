@@ -102,13 +102,8 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("[live %s] incoming method=%s remote=%s contentLength=%d", s.ID, r.Method, r.RemoteAddr, r.ContentLength)
-	for k, v := range r.Header {
-		log.Printf("[live %s] hdr %s=%q", s.ID, k, strings.Join(v, ", "))
-	}
-
 	if err := s.checkIcecastAuth(r); err != nil {
-		log.Printf("[live %s] auth failed: %v", s.ID, err)
+		log.Printf("[live %s] auth failed from %s: %v", s.ID, r.RemoteAddr, err)
 		w.Header().Set("WWW-Authenticate", `Basic realm="source"`)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -119,6 +114,7 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 	s.liveMu.Lock()
 	if s.liveIngest != nil || s.liveActive.Load() {
 		s.liveMu.Unlock()
+		log.Printf("[live %s] rejected %s from %s: live source already active", s.ID, r.Method, r.RemoteAddr)
 		http.Error(w, "live source already active", http.StatusConflict)
 		return
 	}
@@ -126,20 +122,10 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 	s.liveMu.Unlock()
 
 	var reader io.ReadCloser
-	connected := false
-	defer func() {
-		s.clearLiveIngest(reader)
-		if connected {
-			log.Printf("[live %s] ended", s.ID)
-			if s.autoDJ != nil {
-				log.Printf("[live %s] AutoDJ resumed", s.ID)
-			}
-		}
-	}()
+	defer func() { s.clearLiveIngest(reader) }()
 
 	meta := extractLiveMeta(r)
 	s.setLiveMeta(meta)
-	logFormatCheck(s.ID, s.bitrateKbps, s.srHz, s.ch, meta)
 
 	// Reject a mismatched encoder outright: a format mismatch breaks playback
 	// for listeners at the AutoDJ/live splice point (VLC and browsers alike).
@@ -196,7 +182,6 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 		reader = r.Body
 		if expectContinue {
 			w.WriteHeader(http.StatusContinue)
-			log.Printf("[live %s] sent 100-continue for %s", s.ID, r.Method)
 		}
 		if err := http.NewResponseController(w).EnableFullDuplex(); err != nil {
 			log.Printf("[live %s] could not enable full duplex: %v", s.ID, err)
@@ -212,9 +197,9 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 	s.liveMu.Lock()
 	s.liveIngest = reader
 	s.liveMu.Unlock()
-	connected = true
 
-	log.Printf("[live %s] connected: method=%s name=%q bitrate=%s samplerate=%s channels=%s", s.ID, r.Method, meta.Name, meta.Bitrate, meta.SampleRate, meta.Channels)
+	connectedAt := time.Now()
+	log.Printf("[live %s] connected: method=%s remote=%s name=%q bitrate=%s samplerate=%s channels=%s", s.ID, r.Method, r.RemoteAddr, meta.Name, meta.Bitrate, meta.SampleRate, meta.Channels)
 
 	buf := make([]byte, audioChunkSize)
 	bytesReceived := 0
@@ -239,7 +224,7 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 			if !receivedAudio {
 				log.Printf("[live %s] ended before receiving audio: %v", s.ID, err)
 			} else {
-				log.Printf("[live %s] READ end n=%d err=%v (totalBytes=%d)", s.ID, n, err, bytesReceived)
+				log.Printf("[live %s] source disconnected after %s (bytes=%d): %v", s.ID, time.Since(connectedAt).Round(time.Second), bytesReceived, err)
 			}
 			break
 		}
@@ -302,27 +287,6 @@ func parseNumericHeader(raw string) (int, bool) {
 		return 0, false
 	}
 	return n, true
-}
-
-func matchLabel(got int, ok bool, expected int) string {
-	if !ok {
-		return "unknown"
-	}
-	if got == expected {
-		return "false"
-	}
-	return "true"
-}
-
-// logFormatCheck logs the encoder's declared format against what the studio expects.
-func logFormatCheck(studioID string, expectedKbps, expectedHz, expectedCh int, meta LiveMeta) {
-	receivedKbps, kbpsOK := parseNumericHeader(meta.Bitrate)
-	receivedHz, hzOK := parseNumericHeader(meta.SampleRate)
-	receivedCh, chOK := parseNumericHeader(meta.Channels)
-	log.Printf("[live %s] FORMAT-CHECK expected_bitrate=%dkbps received_bitrate=%q bitrate_mismatch=%s expected_samplerate=%dHz received_samplerate=%q samplerate_mismatch=%s expected_channels=%d received_channels=%q channels_mismatch=%s",
-		studioID, expectedKbps, meta.Bitrate, matchLabel(receivedKbps, kbpsOK, expectedKbps),
-		expectedHz, meta.SampleRate, matchLabel(receivedHz, hzOK, expectedHz),
-		expectedCh, meta.Channels, matchLabel(receivedCh, chOK, expectedCh))
 }
 
 // validateLiveBitrate rejects a connection whose bitrate is missing or doesn't match expectedKbps.

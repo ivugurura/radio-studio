@@ -252,11 +252,14 @@ func NewStudio(id string, dir string, brKbps, srHz, ch int, geoR *geo.Resolver, 
 
 // SetCredentials updates the live-ingest Basic Auth credentials. Safe to
 // call repeatedly (e.g. from a refresh ticker) while a source is connected.
-func (s *Studio) SetCredentials(user, password string) {
+// It reports whether they changed (including the first load).
+func (s *Studio) SetCredentials(user, password string) bool {
 	s.credMu.Lock()
+	defer s.credMu.Unlock()
+	changed := s.user != user || s.password != password
 	s.user = user
 	s.password = password
-	s.credMu.Unlock()
+	return changed
 }
 
 func (s *Studio) credentials() (string, string) {
@@ -371,15 +374,12 @@ func (s *Studio) Close() {
 // - Continuing AutoDJ until live frames arrive (prevents silent gaps)
 // - Immediately resuming AutoDJ when live disconnects
 func (s *Studio) switcherLoop() {
-	log.Printf("Studio %s: switcher loop started", s.ID)
-
 	var liveFrameReceived bool
 	var autodjChunk, liveChunk []byte
 
 	for {
 		select {
 		case <-s.stop:
-			log.Printf("Studio %s: switcher loop stopped", s.ID)
 			return
 
 		case autodjChunk = <-s.autodjFeed:
@@ -457,7 +457,6 @@ func (s *Studio) Snapshot() StudioSnapshot {
 }
 
 func (s *Studio) distribute() {
-	log.Printf("Studio %s: distributer started", s.ID)
 	var evictees []*streamListener
 	for data := range s.feed {
 		now := time.Now()
@@ -485,7 +484,6 @@ func (s *Studio) distribute() {
 			evictees = evictees[:0]
 		}
 	}
-	log.Printf("Studio %s: distributor stopped", s.ID)
 }
 
 // rememberBurst appends data to the connect burst, dropping the oldest chunks
@@ -562,9 +560,7 @@ func (s *Studio) HandleListen(w http.ResponseWriter, r *http.Request) {
 		sl.ch <- chunk
 	}
 	s.streamListeners[sl] = struct{}{}
-	total := len(s.streamListeners)
 	s.listenersMu.Unlock()
-	log.Printf("Studio %s: new listener id=%s client=%s (total=%d)", s.ID, id, l.ClientType, total)
 
 	reason := "unknown"
 	defer func() {

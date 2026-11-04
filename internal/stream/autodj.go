@@ -331,12 +331,17 @@ func (a *autoDJ) Play(ctx context.Context) {
 		a.unlock()
 		a.saveState(cur)
 
-		log.Printf("AudioDJ: playing %s", cur.Title)
+		log.Printf("autoDJ: playing %s", cur.Title)
 		if err := a.streamFile(ctx, cur.File, chunkSize); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return
 			}
-			log.Printf("AudioDJ: file ended (%s): %v", cur.Title, err)
+			var trackErr *TrackError
+			if errors.As(err, &trackErr) && trackErr.Kind == "skipped" {
+				log.Printf("autoDJ: skipped %s", cur.Title)
+			} else {
+				log.Printf("autoDJ: track %s failed: %v", cur.Title, err)
+			}
 		}
 
 		a.playlist.ensure()

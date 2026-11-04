@@ -34,9 +34,10 @@ func loadStreamingCredentials(s *stream.Studio, backendAPI, backendAPIKey string
 		log.Printf("streaming config: fetch failed for studio %s: %v", s.ID, err)
 		return
 	}
-	s.SetCredentials(cfg.Username, cfg.Password)
+	if s.SetCredentials(cfg.Username, cfg.Password) {
+		log.Printf("streaming config: live-ingest credentials updated for studio %s", s.ID)
+	}
 	s.SetStationName(cfg.StationName, cfg.StationDescription)
-	log.Printf("streaming config: loaded credentials for studio %s (user=%s)", s.ID, cfg.Username)
 }
 
 func startStreamingCredentialRefresh(s *stream.Studio, backendAPI, backendAPIKey string) {
@@ -137,7 +138,7 @@ func main() {
 		}()
 	}
 
-	log.Printf("Streaming server running at %s\n", cfg.ListenAddr)
+	log.Printf("Streaming server running at %s", cfg.ListenAddr)
 
 	if err := http.ListenAndServe(":"+cfg.ListenAddr, mux); err != nil {
 		log.Fatal("Server failed ", err)

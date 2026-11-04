@@ -167,8 +167,8 @@ Listeners are removed on disconnect, so a rising FD/RSS line here means a leak.
 watch -n5 'curl -s http://127.0.0.1:7081/studios/reformation-rw/status'
 curl -s http://127.0.0.1:7081/studios/reformation-rw/snapshot | jq '{active,bytes_total}'
 
-# connects + evictions live
-sudo journalctl -u radio-studio -f | grep --line-buffered -E 'new listener|dropped slow listener|too many open files'
+# disconnects + evictions live (connects show up in the /status count)
+sudo journalctl -u radio-studio -f | grep --line-buffered -E 'listener disconnected|evicted slow listener|too many open files'
 
 # CPU / RSS
 top -p "$(pgrep -f radio-studio)"          # or: pidstat -p $(pgrep -f radio-studio) 5
