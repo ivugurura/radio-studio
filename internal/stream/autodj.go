@@ -55,8 +55,9 @@ type autoDJ struct {
 	// holds up the audio loop.
 	events chan analytics.IngestPlayBatch
 
-	// pace is only touched by the Play goroutine.
-	pace pacer
+	// pace and resumeTried are only touched by the Play goroutine.
+	pace        pacer
+	resumeTried bool
 }
 
 // maxPaceCatchUp bounds how far behind real time the AutoDJ may fall and still
@@ -293,6 +294,9 @@ func (a *autoDJ) Play(ctx context.Context) {
 
 		a.playlist.ensure()
 		cur, ok := a.playlist.current()
+		if !ok && !a.resumeTried {
+			cur, ok = a.resume()
+		}
 		if !ok {
 			if c2, ok2 := a.playlist.advance(); ok2 {
 				cur = c2
@@ -325,6 +329,7 @@ func (a *autoDJ) Play(ctx context.Context) {
 		})
 
 		a.unlock()
+		a.saveState(cur)
 
 		log.Printf("AudioDJ: playing %s", cur.Title)
 		if err := a.streamFile(ctx, cur.File, chunkSize); err != nil {

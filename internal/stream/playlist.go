@@ -23,6 +23,9 @@ type PlaylistSource interface {
 	current() (Track, bool)
 	nextTrack() (Track, bool)
 	advance() (Track, bool)
+	// seek makes the first track that matches current, and reports whether
+	// one was found.
+	seek(match func(Track) bool) (Track, bool)
 	forceReload()
 }
 
@@ -168,6 +171,18 @@ func (b *backendPlaylist) advance() (Track, bool) {
 		b.idx = (b.idx + 1) % len(b.tracks)
 	}
 	return b.tracks[b.idx], true
+}
+
+func (b *backendPlaylist) seek(match func(Track) bool) (Track, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for i, t := range b.tracks {
+		if match(t) {
+			b.idx = i
+			return t, true
+		}
+	}
+	return Track{}, false
 }
 
 func (b *backendPlaylist) forceReload() {
