@@ -1,6 +1,8 @@
 package stream
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net"
 	"net/http"
 	"strings"
@@ -9,6 +11,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/ivugurura/radio-studio/internal/analytics"
+	"github.com/ivugurura/radio-studio/internal/geo"
+	"github.com/ivugurura/radio-studio/internal/listeners"
 )
 
 // defaultSessionMergeWindow is how long after a listener's last connection
@@ -33,6 +38,8 @@ type listenerSession struct {
 	id        string
 	key       string
 	startedAt time.Time
+	// reportKey is the hashed listener key sent to the backend.
+	reportKey string
 
 	// closedBytes counts the bytes sent on this session's connections that
 	// have closed. Bytes of open connections are read from their listeners.
@@ -49,15 +56,25 @@ type sessionRegistry struct {
 	mu          sync.Mutex
 	byKey       map[string]*listenerSession
 	mergeWindow time.Duration
+	hashKey     func(string) string
 
 	// active is the number of sessions with at least one open connection.
 	active atomic.Int64
 }
 
-func newSessionRegistry(mergeWindow time.Duration) *sessionRegistry {
+// newSessionRegistry builds a registry; hashKey turns a listener key into the
+// value reported to the backend (nil reports a plain SHA-256).
+func newSessionRegistry(mergeWindow time.Duration, hashKey func(string) string) *sessionRegistry {
+	if hashKey == nil {
+		hashKey = func(key string) string {
+			sum := sha256.Sum256([]byte(key))
+			return hex.EncodeToString(sum[:])
+		}
+	}
 	return &sessionRegistry{
 		byKey:       make(map[string]*listenerSession),
 		mergeWindow: mergeWindow,
+		hashKey:     hashKey,
 	}
 }
 
@@ -85,7 +102,19 @@ func (r *sessionRegistry) attach(key string, now time.Time) (sess *listenerSessi
 		}
 	}
 
-	sess = &listenerSession{id: uuid.NewString(), key: key, startedAt: now, conns: 1}
+	id := uuid.NewString()
+	reportKey := key
+	if reportKey == "" {
+		// No identity: the session is its own listener.
+		reportKey = "sid:" + id
+	}
+	sess = &listenerSession{
+		id:        id,
+		key:       key,
+		startedAt: now,
+		reportKey: r.hashKey(reportKey),
+		conns:     1,
+	}
 	if key != "" {
 		r.byKey[key] = sess
 	}
@@ -93,15 +122,18 @@ func (r *sessionRegistry) attach(key string, now time.Time) (sess *listenerSessi
 	return sess, false
 }
 
-// detach records that one of the session's connections closed.
-func (r *sessionRegistry) detach(sess *listenerSession, now time.Time) {
+// detach records that one of the session's connections closed. It reports
+// whether that was the session's last open connection.
+func (r *sessionRegistry) detach(sess *listenerSession, now time.Time) (closed bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	sess.conns--
 	if sess.conns == 0 {
 		sess.endedAt = now
 		r.active.Add(-1)
+		return true
 	}
+	return false
 }
 
 // prune forgets sessions that have been closed for longer than the merge
@@ -126,6 +158,60 @@ func (r *sessionRegistry) activeCount() int {
 	return int(r.active.Load())
 }
 
+// maxPendingEnded caps how many closed sessions wait for delivery while the
+// backend is unreachable.
+const maxPendingEnded = 10000
+
+// endedSession is a closed session whose ended_at the backend has not
+// received yet.
+type endedSession struct {
+	dto analytics.ListenerSession
+}
+
+// endedQueue holds closed sessions until a flush delivers them. Without it a
+// session vanishes from the payload the moment its last connection closes, and
+// the backend never learns that it ended.
+type endedQueue struct {
+	mu   sync.Mutex
+	byID map[string]*endedSession
+}
+
+func newEndedQueue() *endedQueue {
+	return &endedQueue{byID: make(map[string]*endedSession)}
+}
+
+func (q *endedQueue) add(dto analytics.ListenerSession) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if _, ok := q.byID[dto.ID]; !ok && len(q.byID) >= maxPendingEnded {
+		// The backend stays down; its last_seen expiry ends the session instead.
+		return
+	}
+	q.byID[dto.ID] = &endedSession{dto: dto}
+}
+
+func (q *endedQueue) pending() []*endedSession {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	out := make([]*endedSession, 0, len(q.byID))
+	for _, e := range q.byID {
+		out = append(out, e)
+	}
+	return out
+}
+
+// ack drops delivered entries. An entry replaced while the flush was in
+// flight (the session reopened and closed again) stays queued.
+func (q *endedQueue) ack(entries []*endedSession) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for _, e := range entries {
+		if q.byID[e.dto.ID] == e {
+			delete(q.byID, e.dto.ID)
+		}
+	}
+}
+
 func isFingerprintKey(key string) bool {
 	return strings.HasPrefix(key, keyPrefixFingerprint)
 }
@@ -141,6 +227,29 @@ func (s *Studio) listenerKey(r *http.Request, ip net.IP, userAgent string) strin
 		return ""
 	}
 	return keyPrefixFingerprint + s.geoResolver.Fingerprint(ip, userAgent)
+}
+
+// listenerKeyHasher salts listener keys with the IP-hash salt when a resolver
+// is configured.
+func listenerKeyHasher(r *geo.Resolver) func(string) string {
+	if r == nil {
+		return nil
+	}
+	return r.HashKey
+}
+
+// endedSessionDTO describes a session whose last connection (l) just closed.
+// By then removeListener has moved every connection's bytes into closedBytes.
+func endedSessionDTO(sess *listenerSession, l *listeners.Listener, endedAt time.Time) analytics.ListenerSession {
+	dto := analytics.ListenerSession{
+		ID:          sess.id,
+		ListenerKey: sess.reportKey,
+		StartedAt:   sess.startedAt,
+		EndedAt:     &endedAt,
+		TotalBytes:  sess.closedBytes.Load(),
+	}
+	fillSessionDetails(&dto, l)
+	return dto
 }
 
 // SetSessionMergeWindow sets how long a disconnected listener has to reconnect

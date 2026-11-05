@@ -145,7 +145,7 @@ func (s *Studio) StartAnalytics(ingestURL, apiKey string, flushEvery time.Durati
 			fullReconcile := flushN%listenerFullReconcileEvery == 1
 
 			now := time.Now().UTC()
-			active, countries, sessions := s.collectSessions()
+			active, countries, sessions, ended := s.collectSessions()
 			bk.addSample(now, active, countries)
 			bk.accrueListenerMinutes(now.Sub(last), active)
 			last = now
@@ -179,8 +179,10 @@ func (s *Studio) StartAnalytics(ingestURL, apiKey string, flushEvery time.Durati
 
 			// send but don't block streaming on errors
 			if err := client.SendListenerBatch(context.Background(), batch); err != nil {
-				continue // keep sentBytes as-is so these sessions retry next flush
+				continue // keep sentBytes and s.ended as-is so these sessions retry next flush
 			}
+
+			s.ended.ack(ended)
 
 			for _, sess := range toSend {
 				sentBytes[sess.ID] = sess.TotalBytes
@@ -200,7 +202,12 @@ func (s *Studio) StartAnalytics(ingestURL, apiKey string, flushEvery time.Durati
 // and counts the active sessions and their countries. A session can have
 // several connections (two tabs, or a reconnect before the old socket timed
 // out); it is counted once and its bytes are summed.
-func (s *Studio) collectSessions() (active int, countries map[string]int, sessions []analytics.ListenerSession) {
+//
+// It also adds the closed sessions waiting in s.ended, and returns those
+// entries as consumed so the caller can ack them once the batch is delivered.
+// A queued session that has reopened (a reconnect within the merge window) is
+// reported as open instead.
+func (s *Studio) collectSessions() (active int, countries map[string]int, sessions []analytics.ListenerSession, consumed []*endedSession) {
 	countries = map[string]int{}
 	byID := map[string]*analytics.ListenerSession{}
 	open := map[string]bool{}
@@ -211,15 +218,12 @@ func (s *Studio) collectSessions() (active int, countries map[string]int, sessio
 		session, ok := byID[l.ID]
 		if !ok {
 			session = &analytics.ListenerSession{
-				ID:         l.ID,
-				StartedAt:  sl.sess.startedAt,
-				TotalBytes: sl.sess.closedBytes.Load(),
+				ID:          l.ID,
+				ListenerKey: sl.sess.reportKey,
+				StartedAt:   sl.sess.startedAt,
+				TotalBytes:  sl.sess.closedBytes.Load(),
 			}
 			byID[l.ID] = session
-			fillSessionDetails(session, l)
-		} else if session.Country == "" && l.Country != "" {
-			// Geo enrichment is async, so a brand-new connection may not have
-			// a country yet; prefer one of the session's connections that does.
 			fillSessionDetails(session, l)
 		}
 		session.TotalBytes += l.ByteSent.Load()
@@ -230,9 +234,15 @@ func (s *Studio) collectSessions() (active int, countries map[string]int, sessio
 			session.EndedAt = t
 		}
 	}
+	// Read the queue under listenersMu: a connection is removed from
+	// streamListeners before its session is queued, so a queued entry for a
+	// session seen open above comes from an earlier close, and the open state
+	// is the current one. Reading after unlocking could report one session
+	// twice, which the backend's bulk upsert rejects.
+	consumed = s.ended.pending()
 	s.listenersMu.RUnlock()
 
-	sessions = make([]analytics.ListenerSession, 0, len(byID))
+	sessions = make([]analytics.ListenerSession, 0, len(byID)+len(consumed))
 	for id, session := range byID {
 		if open[id] {
 			session.EndedAt = nil
@@ -242,6 +252,11 @@ func (s *Studio) collectSessions() (active int, countries map[string]int, sessio
 			}
 		}
 		sessions = append(sessions, *session)
+	}
+	for _, e := range consumed {
+		if _, reopened := byID[e.dto.ID]; !reopened {
+			sessions = append(sessions, e.dto)
+		}
 	}
 
 	// Emit sessions in a stable order (map iteration above is randomized). The

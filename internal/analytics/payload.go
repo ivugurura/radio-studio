@@ -3,18 +3,22 @@ package analytics
 import "time"
 
 type ListenerSession struct {
-	ID         string     `json:"id"`
-	StartedAt  time.Time  `json:"started_at"`
-	EndedAt    *time.Time `json:"ended_at"`
-	IPHash     string     `json:"ip_hash"`
-	UserAgent  string     `json:"user_agent"`
-	ClientType string     `json:"client_type"`
-	Country    string     `json:"country"`
-	Region     string     `json:"region"`
-	City       string     `json:"city"`
-	Lat        float64    `json:"lat"`
-	Lon        float64    `json:"lon"`
-	TotalBytes int64      `json:"total_bytes"`
+	ID string `json:"id"`
+	// ListenerKey is a salted hash identifying the listener (browser id, or IP +
+	// User-Agent for players without one) across sessions, for unique-listener
+	// counts. Sessions with no identity get a key of their own.
+	ListenerKey string     `json:"listener_key"`
+	StartedAt   time.Time  `json:"started_at"`
+	EndedAt     *time.Time `json:"ended_at"`
+	IPHash      string     `json:"ip_hash"`
+	UserAgent   string     `json:"user_agent"`
+	ClientType  string     `json:"client_type"`
+	Country     string     `json:"country"`
+	Region      string     `json:"region"`
+	City        string     `json:"city"`
+	Lat         float64    `json:"lat"`
+	Lon         float64    `json:"lon"`
+	TotalBytes  int64      `json:"total_bytes"`
 }
 
 type ListenerBucket struct {

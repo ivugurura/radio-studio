@@ -199,6 +199,8 @@ type Studio struct {
 	// sessions groups connections into listener sessions, so a reconnect is
 	// not counted as a new listener (sessions.go).
 	sessions *sessionRegistry
+	// ended holds closed sessions until analytics delivers their ended_at.
+	ended *endedQueue
 
 	// burst holds the most recent ~burstLimit bytes of the feed for new
 	// listeners. Guarded by listenersMu.
@@ -228,7 +230,8 @@ func NewStudio(id string, dir string, brKbps, srHz, ch int, geoR *geo.Resolver, 
 		feed:             make(chan []byte, queueCapacity(brKbps, 2)),
 		listenersStore:   listeners.NewStore(),
 		writeTimeout:     defaultListenerWriteTimeout,
-		sessions:         newSessionRegistry(defaultSessionMergeWindow),
+		sessions:         newSessionRegistry(defaultSessionMergeWindow, listenerKeyHasher(geoR)),
+		ended:            newEndedQueue(),
 		burstLimit:       bytesPerSecond(brKbps) * connectBurstSeconds,
 		streamListeners:  make(map[*streamListener]struct{}),
 		geoResolver:      geoR,
@@ -590,7 +593,9 @@ func (s *Studio) HandleListen(w http.ResponseWriter, r *http.Request) {
 		l.MarkDisconnected()
 		s.removeListener(sl)
 		s.listenersStore.Remove(l)
-		s.sessions.detach(sess, time.Now())
+		if endedAt := time.Now(); s.sessions.detach(sess, endedAt) {
+			s.ended.add(endedSessionDTO(sess, l, endedAt))
+		}
 		log.Printf("Studio %s: listener disconnected id=%s client=%s reason=%s after=%s sent=%dB",
 			s.ID, id, l.ClientType, reason, time.Since(now).Round(time.Second), l.ByteSent.Load())
 	}()
