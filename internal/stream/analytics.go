@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ivugurura/radio-studio/internal/analytics"
+	"github.com/ivugurura/radio-studio/internal/listeners"
 )
 
 type bucketState struct {
@@ -195,39 +196,53 @@ func (s *Studio) StartAnalytics(ingestURL, apiKey string, flushEvery time.Durati
 	return stop
 }
 
-// collectSessions reads current and recently disconnected listeners into DTOs and aggregates counts
+// collectSessions turns the open connections into one DTO per listener session
+// and counts the active sessions and their countries. A session can have
+// several connections (two tabs, or a reconnect before the old socket timed
+// out); it is counted once and its bytes are summed.
 func (s *Studio) collectSessions() (active int, countries map[string]int, sessions []analytics.ListenerSession) {
 	countries = map[string]int{}
+	byID := map[string]*analytics.ListenerSession{}
+	open := map[string]bool{}
 
 	s.listenersMu.RLock()
 	for sl := range s.streamListeners {
 		l := sl.l
-		if l.DisconnectedAt.Load() == nil {
-			active++
+		session, ok := byID[l.ID]
+		if !ok {
+			session = &analytics.ListenerSession{
+				ID:         l.ID,
+				StartedAt:  sl.sess.startedAt,
+				TotalBytes: sl.sess.closedBytes.Load(),
+			}
+			byID[l.ID] = session
+			fillSessionDetails(session, l)
+		} else if session.Country == "" && l.Country != "" {
+			// Geo enrichment is async, so a brand-new connection may not have
+			// a country yet; prefer one of the session's connections that does.
+			fillSessionDetails(session, l)
 		}
-		if l.Country != "" {
-			countries[l.Country]++
-		}
+		session.TotalBytes += l.ByteSent.Load()
 
-		session := analytics.ListenerSession{
-			ID:         l.ID,
-			StartedAt:  l.ConnectedAt,
-			IPHash:     l.IPHash,
-			UserAgent:  l.UserAgent,
-			ClientType: l.ClientType,
-			Country:    l.Country,
-			Region:     l.Region,
-			City:       l.City,
-			Lat:        l.Lat,
-			Lon:        l.Lon,
-			TotalBytes: l.ByteSent.Load(),
-		}
-		if t := l.DisconnectedAt.Load(); t != nil {
+		if t := l.DisconnectedAt.Load(); t == nil {
+			open[l.ID] = true
+		} else if session.EndedAt == nil || t.After(*session.EndedAt) {
 			session.EndedAt = t
 		}
-		sessions = append(sessions, session)
 	}
 	s.listenersMu.RUnlock()
+
+	sessions = make([]analytics.ListenerSession, 0, len(byID))
+	for id, session := range byID {
+		if open[id] {
+			session.EndedAt = nil
+			active++
+			if session.Country != "" {
+				countries[session.Country]++
+			}
+		}
+		sessions = append(sessions, *session)
+	}
 
 	// Emit sessions in a stable order (map iteration above is randomized). The
 	// backend ingest locks listener_sessions rows in payload order; a consistent
@@ -236,4 +251,15 @@ func (s *Studio) collectSessions() (active int, countries map[string]int, sessio
 	// connect/disconnect storm.
 	sort.Slice(sessions, func(i, j int) bool { return sessions[i].ID < sessions[j].ID })
 	return
+}
+
+func fillSessionDetails(session *analytics.ListenerSession, l *listeners.Listener) {
+	session.IPHash = l.IPHash
+	session.UserAgent = l.UserAgent
+	session.ClientType = l.ClientType
+	session.Country = l.Country
+	session.Region = l.Region
+	session.City = l.City
+	session.Lat = l.Lat
+	session.Lon = l.Lon
 }
