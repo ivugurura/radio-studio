@@ -30,6 +30,10 @@ type Config struct {
 	EventFlushInterval time.Duration
 	SnapshotInterval   time.Duration
 
+	// SessionMergeWindow is how long a disconnected listener has to reconnect
+	// and continue the same session instead of counting as a new listen.
+	SessionMergeWindow time.Duration
+
 	// Fallback track
 	DefaultTrackFile string
 
@@ -60,6 +64,7 @@ func LoadConfig() *Config {
 		BackendAPI:         get("BACKEND_API", ""),
 		EventFlushInterval: durationEnv("EVENT_FLUSH_INTERVAL", 15*time.Second),
 		SnapshotInterval:   durationEnv("SNAPSHOT_INTERVAL", 5*time.Second),
+		SessionMergeWindow: durationEnv("SESSION_MERGE_WINDOW", 60*time.Second),
 		DefaultBrKbps:      intEnv("DEFAULT_BR_KBPS", 128),
 		DefaultSrHz:        intEnv("DEFAULT_SR_HZ", 48000),
 		DefaultCh:          intEnv("DEFAULT_CH", 2),

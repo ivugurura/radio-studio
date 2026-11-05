@@ -14,7 +14,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/ivugurura/radio-studio/internal/geo"
 	"github.com/ivugurura/radio-studio/internal/listeners"
 	"github.com/ivugurura/radio-studio/internal/netutil"
@@ -48,6 +47,7 @@ type studioStatus struct {
 
 type streamListener struct {
 	l         *listeners.Listener
+	sess      *listenerSession
 	ch        chan []byte
 	evicted   chan struct{}
 	evictOnce sync.Once
@@ -57,9 +57,10 @@ type streamListener struct {
 	resyncs []time.Time
 }
 
-func newStreamListener(l *listeners.Listener, capacity int) *streamListener {
+func newStreamListener(l *listeners.Listener, sess *listenerSession, capacity int) *streamListener {
 	return &streamListener{
 		l:       l,
+		sess:    sess,
 		ch:      make(chan []byte, capacity),
 		evicted: make(chan struct{}),
 	}
@@ -195,6 +196,12 @@ type Studio struct {
 	listenersStore  *listeners.Store
 	writeTimeout    time.Duration
 
+	// sessions groups connections into listener sessions, so a reconnect is
+	// not counted as a new listener (sessions.go).
+	sessions *sessionRegistry
+	// ended holds closed sessions until analytics delivers their ended_at.
+	ended *endedQueue
+
 	// burst holds the most recent ~burstLimit bytes of the feed for new
 	// listeners. Guarded by listenersMu.
 	burst      [][]byte
@@ -223,6 +230,8 @@ func NewStudio(id string, dir string, brKbps, srHz, ch int, geoR *geo.Resolver, 
 		feed:             make(chan []byte, queueCapacity(brKbps, 2)),
 		listenersStore:   listeners.NewStore(),
 		writeTimeout:     defaultListenerWriteTimeout,
+		sessions:         newSessionRegistry(defaultSessionMergeWindow, listenerKeyHasher(geoR)),
+		ended:            newEndedQueue(),
 		burstLimit:       bytesPerSecond(brKbps) * connectBurstSeconds,
 		streamListeners:  make(map[*streamListener]struct{}),
 		geoResolver:      geoR,
@@ -354,6 +363,7 @@ func (s *Studio) snapshotLoop() {
 		select {
 		case <-t.C:
 			s.buildSnapshot()
+			s.sessions.prune(time.Now())
 		case <-s.stop:
 			return
 		}
@@ -415,9 +425,13 @@ func (s *Studio) push(data []byte) {
 	}
 }
 
+// removeListener drops a closed connection and moves its byte count into its
+// session. Both happen under listenersMu, so collectSessions never counts the
+// bytes twice or misses them.
 func (s *Studio) removeListener(sl *streamListener) {
 	s.listenersMu.Lock()
 	delete(s.streamListeners, sl)
+	sl.sess.closedBytes.Add(sl.l.ByteSent.Load())
 	s.listenersMu.Unlock()
 }
 
@@ -430,7 +444,14 @@ func (s *Studio) buildSnapshot() {
 		ClientTypes: make(map[string]int),
 	}
 	var totalBytes int64
+	seen := make(map[string]struct{}, len(active))
 	for _, l := range active {
+		totalBytes += l.ByteSent.Load()
+		// Several connections can share one session; count the listener once.
+		if _, dup := seen[l.ID]; dup {
+			continue
+		}
+		seen[l.ID] = struct{}{}
 		snap.Active++
 		c := l.Country
 		if c == "" {
@@ -442,7 +463,6 @@ func (s *Studio) buildSnapshot() {
 			ct = "unknown"
 		}
 		snap.ClientTypes[ct]++
-		totalBytes += l.ByteSent.Load()
 	}
 	snap.BytesTotal = totalBytes
 	s.snapshotMu.Lock()
@@ -532,10 +552,13 @@ func (s *Studio) HandleListen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := uuid.NewString()
 	ip := netutil.ExtractClientIp(r)
 	now := time.Now()
 	userAgent := r.Header.Get("User-Agent")
+	// The listener's ID is its session ID: a reconnect within the merge window
+	// keeps the ID, so the backend sees one session instead of a new listen.
+	sess, resumed := s.sessions.attach(s.listenerKey(r, ip, userAgent), now)
+	id := sess.id
 	l := &listeners.Listener{
 		ID:          id,
 		StudioId:    s.ID,
@@ -545,9 +568,12 @@ func (s *Studio) HandleListen(w http.ResponseWriter, r *http.Request) {
 		ConnectedAt: now,
 	}
 	l.LastHeartbeat.Store(&now)
+	// Enrich before the listener is published: the snapshot and analytics
+	// goroutines read the geo fields without a lock, so they must be final by
+	// the time listenersStore and streamListeners can hand l to them. A local
+	// GeoIP lookup takes microseconds.
+	s.geoResolver.Enrich(l)
 	s.listenersStore.Add(l)
-
-	go s.geoResolver.Enrich(l)
 
 	s.listenersMu.Lock()
 	// Prefill with the connect burst. Under the lock, so distribute can't
@@ -555,7 +581,7 @@ func (s *Studio) HandleListen(w http.ResponseWriter, r *http.Request) {
 	// count (small live-ingest chunks can outnumber a byte-based estimate),
 	// so the whole burst fits and the headroom stays free.
 	burst := s.burst
-	sl := newStreamListener(l, queueCapacity(s.bitrateKbps, listenerHeadroomSeconds)+len(burst))
+	sl := newStreamListener(l, sess, queueCapacity(s.bitrateKbps, listenerHeadroomSeconds)+len(burst))
 	for _, chunk := range burst {
 		sl.ch <- chunk
 	}
@@ -566,10 +592,16 @@ func (s *Studio) HandleListen(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		l.MarkDisconnected()
 		s.removeListener(sl)
-		s.listenersStore.Remove(l.ID)
+		s.listenersStore.Remove(l)
+		if endedAt := time.Now(); s.sessions.detach(sess, endedAt) {
+			s.ended.add(endedSessionDTO(sess, l, endedAt))
+		}
 		log.Printf("Studio %s: listener disconnected id=%s client=%s reason=%s after=%s sent=%dB",
 			s.ID, id, l.ClientType, reason, time.Since(now).Round(time.Second), l.ByteSent.Load())
 	}()
+	if resumed {
+		log.Printf("Studio %s: listener reconnected, continuing session id=%s", s.ID, id)
+	}
 
 	ctx := r.Context()
 	for {
@@ -622,16 +654,10 @@ func touchHeartbeat(l *listeners.Listener) {
 
 // Example status endpoint (extend with richer JSON / metrics).
 func (s *Studio) HandleStatus(w http.ResponseWriter, r *http.Request) {
-	s.listenersMu.RLock()
-	listenerCount := len(s.streamListeners)
-	s.listenersMu.RUnlock()
-
-	live := s.liveActive.Load()
-
 	sStatus := studioStatus{
 		Studio:         s.ID,
-		IsLive:         live,
-		ListenersCount: listenerCount,
+		IsLive:         s.liveActive.Load(),
+		ListenersCount: s.sessions.activeCount(),
 	}
 
 	netutil.ServerResponse(w, 200, "Success", sStatus)

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ivugurura/radio-studio/internal/analytics"
+	"github.com/ivugurura/radio-studio/internal/listeners"
 )
 
 type bucketState struct {
@@ -130,7 +131,13 @@ func (s *Studio) StartAnalytics(ingestURL, apiKey string, flushEvery time.Durati
 			listenerResendDeltaBytes   = 1 << 20 // ~64s of audio at 128 kbps
 			listenerFullReconcileEvery = 12      // at 15s flush => every ~3 min
 		)
-		sentBytes := map[string]int64{}
+		// sent remembers what the backend last received for each session, so
+		// unchanged sessions are not resent on every flush.
+		type sentState struct {
+			bytes int64
+			ended bool
+		}
+		sent := map[string]sentState{}
 		flushN := 0
 
 		for {
@@ -144,7 +151,7 @@ func (s *Studio) StartAnalytics(ingestURL, apiKey string, flushEvery time.Durati
 			fullReconcile := flushN%listenerFullReconcileEvery == 1
 
 			now := time.Now().UTC()
-			active, countries, sessions := s.collectSessions()
+			active, countries, sessions, ended := s.collectSessions()
 			bk.addSample(now, active, countries)
 			bk.accrueListenerMinutes(now.Sub(last), active)
 			last = now
@@ -157,9 +164,13 @@ func (s *Studio) StartAnalytics(ingestURL, apiKey string, flushEvery time.Durati
 				if sess.EndedAt == nil {
 					connectedIDs = append(connectedIDs, sess.ID)
 				}
-				prev, known := sentBytes[sess.ID]
-				if fullReconcile || !known || sess.EndedAt != nil ||
-					sess.TotalBytes-prev >= listenerResendDeltaBytes {
+				prev, known := sent[sess.ID]
+				ended := sess.EndedAt != nil
+				// A session reopened by a reconnect (ended -> open) must be
+				// resent at once: the backend still has its ended_at and would
+				// not count the listener as active until the next resend.
+				if fullReconcile || !known || ended || prev.ended != ended ||
+					sess.TotalBytes-prev.bytes >= listenerResendDeltaBytes {
 					toSend = append(toSend, sess)
 				}
 			}
@@ -178,15 +189,17 @@ func (s *Studio) StartAnalytics(ingestURL, apiKey string, flushEvery time.Durati
 
 			// send but don't block streaming on errors
 			if err := client.SendListenerBatch(context.Background(), batch); err != nil {
-				continue // keep sentBytes as-is so these sessions retry next flush
+				continue // keep sent and s.ended as-is so these sessions retry next flush
 			}
 
+			s.ended.ack(ended)
+
 			for _, sess := range toSend {
-				sentBytes[sess.ID] = sess.TotalBytes
+				sent[sess.ID] = sentState{bytes: sess.TotalBytes, ended: sess.EndedAt != nil}
 			}
-			for id := range sentBytes {
+			for id := range sent {
 				if _, ok := present[id]; !ok {
-					delete(sentBytes, id)
+					delete(sent, id)
 				}
 			}
 		}
@@ -195,39 +208,66 @@ func (s *Studio) StartAnalytics(ingestURL, apiKey string, flushEvery time.Durati
 	return stop
 }
 
-// collectSessions reads current and recently disconnected listeners into DTOs and aggregates counts
-func (s *Studio) collectSessions() (active int, countries map[string]int, sessions []analytics.ListenerSession) {
+// collectSessions turns the open connections into one DTO per listener session
+// and counts the active sessions and their countries. A session can have
+// several connections (two tabs, or a reconnect before the old socket timed
+// out); it is counted once and its bytes are summed.
+//
+// It also adds the closed sessions waiting in s.ended, and returns those
+// entries as consumed so the caller can ack them once the batch is delivered.
+// A queued session that has reopened (a reconnect within the merge window) is
+// reported as open instead.
+func (s *Studio) collectSessions() (active int, countries map[string]int, sessions []analytics.ListenerSession, consumed []*endedSession) {
 	countries = map[string]int{}
+	byID := map[string]*analytics.ListenerSession{}
+	open := map[string]bool{}
 
 	s.listenersMu.RLock()
 	for sl := range s.streamListeners {
 		l := sl.l
-		if l.DisconnectedAt.Load() == nil {
-			active++
+		session, ok := byID[l.ID]
+		if !ok {
+			session = &analytics.ListenerSession{
+				ID:          l.ID,
+				ListenerKey: sl.sess.reportKey,
+				StartedAt:   sl.sess.startedAt,
+				TotalBytes:  sl.sess.closedBytes.Load(),
+			}
+			byID[l.ID] = session
+			fillSessionDetails(session, l)
 		}
-		if l.Country != "" {
-			countries[l.Country]++
-		}
+		session.TotalBytes += l.ByteSent.Load()
 
-		session := analytics.ListenerSession{
-			ID:         l.ID,
-			StartedAt:  l.ConnectedAt,
-			IPHash:     l.IPHash,
-			UserAgent:  l.UserAgent,
-			ClientType: l.ClientType,
-			Country:    l.Country,
-			Region:     l.Region,
-			City:       l.City,
-			Lat:        l.Lat,
-			Lon:        l.Lon,
-			TotalBytes: l.ByteSent.Load(),
-		}
-		if t := l.DisconnectedAt.Load(); t != nil {
+		if t := l.DisconnectedAt.Load(); t == nil {
+			open[l.ID] = true
+		} else if session.EndedAt == nil || t.After(*session.EndedAt) {
 			session.EndedAt = t
 		}
-		sessions = append(sessions, session)
 	}
+	// Read the queue under listenersMu: a connection is removed from
+	// streamListeners before its session is queued, so a queued entry for a
+	// session seen open above comes from an earlier close, and the open state
+	// is the current one. Reading after unlocking could report one session
+	// twice, which the backend's bulk upsert rejects.
+	consumed = s.ended.pending()
 	s.listenersMu.RUnlock()
+
+	sessions = make([]analytics.ListenerSession, 0, len(byID)+len(consumed))
+	for id, session := range byID {
+		if open[id] {
+			session.EndedAt = nil
+			active++
+			if session.Country != "" {
+				countries[session.Country]++
+			}
+		}
+		sessions = append(sessions, *session)
+	}
+	for _, e := range consumed {
+		if _, reopened := byID[e.dto.ID]; !reopened {
+			sessions = append(sessions, e.dto)
+		}
+	}
 
 	// Emit sessions in a stable order (map iteration above is randomized). The
 	// backend ingest locks listener_sessions rows in payload order; a consistent
@@ -236,4 +276,15 @@ func (s *Studio) collectSessions() (active int, countries map[string]int, sessio
 	// connect/disconnect storm.
 	sort.Slice(sessions, func(i, j int) bool { return sessions[i].ID < sessions[j].ID })
 	return
+}
+
+func fillSessionDetails(session *analytics.ListenerSession, l *listeners.Listener) {
+	session.IPHash = l.IPHash
+	session.UserAgent = l.UserAgent
+	session.ClientType = l.ClientType
+	session.Country = l.Country
+	session.Region = l.Region
+	session.City = l.City
+	session.Lat = l.Lat
+	session.Lon = l.Lon
 }

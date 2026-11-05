@@ -4,44 +4,38 @@ import (
 	"sync"
 )
 
+// Store holds one entry per open connection. It is keyed by the Listener
+// pointer, not Listener.ID: the ID is the listener's session ID, which several
+// connections can share (two tabs, or a reconnect while the old socket has not
+// timed out yet).
 type Store struct {
 	mu        sync.RWMutex
-	listeners map[string]*Listener
+	listeners map[*Listener]struct{}
 }
 
 func NewStore() *Store {
 	return &Store{
-		listeners: make(map[string]*Listener),
+		listeners: make(map[*Listener]struct{}),
 	}
 }
 
 func (s *Store) Add(l *Listener) {
 	s.mu.Lock()
-	s.listeners[l.ID] = l
+	s.listeners[l] = struct{}{}
 	s.mu.Unlock()
 }
 
-func (s *Store) Remove(id string) *Listener {
+func (s *Store) Remove(l *Listener) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	l := s.listeners[id]
-	delete(s.listeners, id)
-
-	return l
-}
-
-func (s *Store) Get(id string) (*Listener, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	l, ok := s.listeners[id]
-	return l, ok
+	delete(s.listeners, l)
+	s.mu.Unlock()
 }
 
 func (s *Store) Active() []*Listener {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	listeners := make([]*Listener, 0, len(s.listeners))
-	for _, l := range s.listeners {
+	for l := range s.listeners {
 		if l.DisconnectedAt.Load() == nil {
 			listeners = append(listeners, l)
 		}

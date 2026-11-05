@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"log"
+	"net"
 
 	"github.com/ivugurura/radio-studio/internal/listeners"
 	"github.com/oschwald/geoip2-golang"
@@ -39,6 +40,29 @@ func (r *Resolver) hash(l *listeners.Listener) {
 	sum := sha256.Sum256(append(r.salt, []byte(l.RemoteIP.String())...))
 	l.IPHash = hex.EncodeToString(sum[:])
 	l.RemoteIP = nil // drop raw IP
+}
+
+// Fingerprint returns a salted hash of a client's IP and User-Agent. It lets
+// the studio recognise a returning player that sends no listener id, without
+// keeping the raw IP.
+func (r *Resolver) Fingerprint(ip net.IP, userAgent string) string {
+	return r.saltedHash(ip.String(), userAgent)
+}
+
+// HashKey returns a salted hash of a listener key, so the backend can count
+// unique listeners without storing the browser's raw listener id.
+func (r *Resolver) HashKey(key string) string {
+	return r.saltedHash("listener-key", key)
+}
+
+func (r *Resolver) saltedHash(parts ...string) string {
+	h := sha256.New()
+	h.Write(r.salt)
+	for _, p := range parts {
+		h.Write([]byte(p))
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func (r *Resolver) Close() {
