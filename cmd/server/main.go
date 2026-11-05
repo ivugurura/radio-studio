@@ -98,6 +98,7 @@ func main() {
 	s1 := manager.RegisterStudio("reformation-rw")
 	// manager.RegisterStudio("reformation-congo")
 	s1.SetStationLinks(cfg.StationGenre, cfg.StationURL)
+	s1.SetSessionMergeWindow(cfg.SessionMergeWindow)
 
 	if cfg.BackendAPI != "" {
 		backendIngestURL := cfg.BackendAPI + "/studios/" + s1.ID + "/listener-events"
