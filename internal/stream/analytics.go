@@ -131,7 +131,13 @@ func (s *Studio) StartAnalytics(ingestURL, apiKey string, flushEvery time.Durati
 			listenerResendDeltaBytes   = 1 << 20 // ~64s of audio at 128 kbps
 			listenerFullReconcileEvery = 12      // at 15s flush => every ~3 min
 		)
-		sentBytes := map[string]int64{}
+		// sent remembers what the backend last received for each session, so
+		// unchanged sessions are not resent on every flush.
+		type sentState struct {
+			bytes int64
+			ended bool
+		}
+		sent := map[string]sentState{}
 		flushN := 0
 
 		for {
@@ -158,9 +164,13 @@ func (s *Studio) StartAnalytics(ingestURL, apiKey string, flushEvery time.Durati
 				if sess.EndedAt == nil {
 					connectedIDs = append(connectedIDs, sess.ID)
 				}
-				prev, known := sentBytes[sess.ID]
-				if fullReconcile || !known || sess.EndedAt != nil ||
-					sess.TotalBytes-prev >= listenerResendDeltaBytes {
+				prev, known := sent[sess.ID]
+				ended := sess.EndedAt != nil
+				// A session reopened by a reconnect (ended -> open) must be
+				// resent at once: the backend still has its ended_at and would
+				// not count the listener as active until the next resend.
+				if fullReconcile || !known || ended || prev.ended != ended ||
+					sess.TotalBytes-prev.bytes >= listenerResendDeltaBytes {
 					toSend = append(toSend, sess)
 				}
 			}
@@ -179,17 +189,17 @@ func (s *Studio) StartAnalytics(ingestURL, apiKey string, flushEvery time.Durati
 
 			// send but don't block streaming on errors
 			if err := client.SendListenerBatch(context.Background(), batch); err != nil {
-				continue // keep sentBytes and s.ended as-is so these sessions retry next flush
+				continue // keep sent and s.ended as-is so these sessions retry next flush
 			}
 
 			s.ended.ack(ended)
 
 			for _, sess := range toSend {
-				sentBytes[sess.ID] = sess.TotalBytes
+				sent[sess.ID] = sentState{bytes: sess.TotalBytes, ended: sess.EndedAt != nil}
 			}
-			for id := range sentBytes {
+			for id := range sent {
 				if _, ok := present[id]; !ok {
-					delete(sentBytes, id)
+					delete(sent, id)
 				}
 			}
 		}
