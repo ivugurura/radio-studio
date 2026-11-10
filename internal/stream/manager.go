@@ -49,6 +49,12 @@ func WithAutoDJFactory(f AutoDJFactory) ManagerOption {
 	return func(m *Manager) { m.autoDJFactory = f }
 }
 
+// WithStudioAliases lets requests for an old studio ID (key) reach the
+// studio registered under the new ID (value).
+func WithStudioAliases(aliases map[string]string) ManagerOption {
+	return func(m *Manager) { m.aliases = aliases }
+}
+
 // Manager coordinates all studios
 type Manager struct {
 	mu           sync.RWMutex
@@ -64,6 +70,9 @@ type Manager struct {
 
 	validator RequestValidator
 	factory   StudioFactory
+
+	// aliases maps old studio IDs to current ones so old URLs keep working.
+	aliases map[string]string
 }
 
 // NewManager create a new Manager
@@ -118,6 +127,11 @@ func (m *Manager) GetStudio(studioID string) (*Studio, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	s, ok := m.studios[studioID]
+	if !ok {
+		if target, aliased := m.aliases[studioID]; aliased {
+			s, ok = m.studios[target]
+		}
+	}
 
 	return s, ok
 }

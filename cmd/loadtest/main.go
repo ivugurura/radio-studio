@@ -11,7 +11,7 @@
 // Example:
 //
 //	go run ./cmd/loadtest \
-//	  -url http://127.0.0.1:7080/studios/reformation-rw/listen \
+//	  -url http://127.0.0.1:7080/studios/rw/listen \
 //	  -start 200 -step 200 -step-interval 45s -max 20000 -hold 60s -out ramp.csv
 package main
 

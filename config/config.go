@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -41,6 +42,10 @@ type Config struct {
 	// description come from the backend per studio.
 	StationGenre string
 	StationURL   string
+
+	// FallbackStudios are registered when the backend's studio list can't be
+	// fetched at startup (comma-separated STUDIOS, e.g. "rw,en").
+	FallbackStudios []string
 }
 
 func LoadConfig() *Config {
@@ -71,9 +76,20 @@ func LoadConfig() *Config {
 		DefaultTrackFile:   get("DEFAULT_TRACK_FILE", ""),
 		StationGenre:       get("STATION_GENRE", ""),
 		StationURL:         get("STATION_URL", ""),
+		FallbackStudios:    splitList(get("STUDIOS", "")),
 	}
 
 	return cfg
+}
+
+func splitList(v string) []string {
+	var out []string
+	for _, item := range strings.Split(v, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func durationEnv(key string, def time.Duration) time.Duration {

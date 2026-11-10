@@ -71,7 +71,7 @@ or 2. The **last clean ramp step** is the reported capacity.
 **Confirm audio is flowing** (should sit at ~16 KB/s):
 
 ```sh
-curl -N http://127.0.0.1:7081/studios/reformation-rw/listen | pv -br > /dev/null
+curl -N http://127.0.0.1:7081/studios/rw/listen | pv -br > /dev/null
 ```
 
 **Egress + cost.** Sustained egress ≈ `128 kbps x listeners`. 5 000 listeners ≈
@@ -92,11 +92,11 @@ LISTEN_ADDR=7080 ENABLE_PPROF=1 go run cmd/server/main.go
 
 # terminal 2 — 10 listeners for 30 s
 go run cmd/loadtest/main.go \
-  -url http://127.0.0.1:7080/studios/reformation-rw/listen \
+  -url http://127.0.0.1:7080/studios/rw/listen \
   -start 10 -step 0 -max 10 -hold 30s -out dry.csv
 
 # terminal 3 — cross-checks
-curl -s http://127.0.0.1:7080/studios/reformation-rw/status        # listeners_count: 10
+curl -s http://127.0.0.1:7080/studios/rw/status        # listeners_count: 10
 curl -s 'http://127.0.0.1:6060/debug/pprof/goroutine?debug=1' | head -1
 curl -s http://127.0.0.1:6060/debug/vars | jq .memstats.Alloc
 ```
@@ -119,7 +119,7 @@ removes WAN noise — isolates CPU / RAM / goroutines / FDs):
 ```sh
 ulimit -n 1048576
 go run ./cmd/loadtest/main.go \
-  -url http://STAGING_HOST:7081/studios/reformation-rw/listen \
+  -url http://STAGING_HOST:7081/studios/rw/listen \
   -start 200 -step 200 -step-interval 45s -max 20000 -hold 60s \
   -out phaseA.csv
 ```
@@ -138,7 +138,7 @@ public hostname:
 
 ```sh
 go run ./cmd/loadtest \
-  -url https://stream.example.org/studios/reformation-rw/listen \
+  -url https://stream.example.org/studios/rw/listen \
   -start 200 -step 200 -step-interval 45s -max 20000 -hold 60s \
   -out phaseB.csv
 ```
@@ -164,8 +164,8 @@ Listeners are removed on disconnect, so a rising FD/RSS line here means a leak.
 
 ```sh
 # listener count the server actually holds — compare to the generator's "intended"
-watch -n5 'curl -s http://127.0.0.1:7081/studios/reformation-rw/status'
-curl -s http://127.0.0.1:7081/studios/reformation-rw/snapshot | jq '{active,bytes_total}'
+watch -n5 'curl -s http://127.0.0.1:7081/studios/rw/status'
+curl -s http://127.0.0.1:7081/studios/rw/snapshot | jq '{active,bytes_total}'
 
 # disconnects + evictions live (connects show up in the /status count)
 sudo journalctl -u radio-studio -f | grep --line-buffered -E 'listener disconnected|evicted slow listener|too many open files'
@@ -227,7 +227,7 @@ ttfb_p99_ms, perconn_min_kbps, perconn_mean_kbps`.
 ```sh
 # install: https://grafana.com/docs/k6/latest/set-up/install-k6/
 k6 run \
-  -e URL=http://STAGING_HOST:7081/studios/reformation-rw/listen \
+  -e URL=http://STAGING_HOST:7081/studios/rw/listen \
   -e MAX=5000 -e START=200 -e STEP=200 -e STEP_S=45 -e HOLD_S=45 \
   deploy/loadtest.k6.js
 ```
@@ -243,7 +243,7 @@ Verifies stalled clients are eventually released instead of lingering as ghost
 listeners:
 
 ```sh
-go run ./cmd/loadtest -url http://127.0.0.1:7080/studios/reformation-rw/listen \
+go run ./cmd/loadtest -url http://127.0.0.1:7080/studios/rw/listen \
   -start 100 -step 0 -max 100 -hold 8m -stall-pct 20
 ```
 

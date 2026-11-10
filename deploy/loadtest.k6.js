@@ -11,12 +11,12 @@
 //
 // Run (ramp 200 -> 5000 VUs, ~9 min):
 //   k6 run \
-//     -e URL=http://STAGING:7081/studios/reformation-rw/listen \
+//     -e URL=http://STAGING:7081/studios/rw/listen \
 //     -e MAX=5000 -e HOLD_S=45 \
 //     deploy/loadtest.k6.js
 //
 // Quick smoke:
-//   k6 run -e URL=http://127.0.0.1:7080/studios/reformation-rw/listen -e MAX=50 deploy/loadtest.k6.js
+//   k6 run -e URL=http://127.0.0.1:7080/studios/rw/listen -e MAX=50 deploy/loadtest.k6.js
 
 import http from 'k6/http';
 import { check } from 'k6';
