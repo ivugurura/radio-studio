@@ -213,6 +213,16 @@ type Studio struct {
 	snapshotInterval time.Duration
 	stop             chan struct{}
 
+	// Shutdown (Close). closed is set under listenersMu, so a listener either
+	// joins listenerWG before Close waits on it or is refused.
+	closeOnce  sync.Once
+	closed     atomic.Bool
+	listenerWG sync.WaitGroup
+	// drained is closed once listeners are gone; analytics then sends its
+	// last batch and closes analyticsDone (nil when analytics never started).
+	drained       chan struct{}
+	analyticsDone chan struct{}
+
 	geoResolver  *geo.Resolver
 	autoDJ       AutoDJ
 	autoDJCancel context.CancelFunc
@@ -237,6 +247,7 @@ func NewStudio(id string, dir string, brKbps, srHz, ch int, geoR *geo.Resolver, 
 		geoResolver:      geoR,
 		snapshotInterval: snapIn,
 		stop:             make(chan struct{}),
+		drained:          make(chan struct{}),
 	}
 
 	go s.distribute()
@@ -370,12 +381,67 @@ func (s *Studio) snapshotLoop() {
 	}
 }
 
+// studioCloseTimeout bounds how long Close waits for listeners to leave and
+// for the last analytics batch to reach the backend.
+const studioCloseTimeout = 10 * time.Second
+
+// Done is closed when the studio starts shutting down, so per-studio work
+// started outside this package (e.g. a credential refresh) can stop with it.
+func (s *Studio) Done() <-chan struct{} {
+	return s.stop
+}
+
+// Close stops the studio: AutoDJ, the switcher, fan-out and snapshots stop,
+// listeners and the live source are disconnected, and analytics sends a last
+// batch so their sessions end in the backend. New listeners and sources are
+// refused. Safe to call more than once and from any goroutine.
 func (s *Studio) Close() {
+	s.closeOnce.Do(s.close)
+}
+
+func (s *Studio) close() {
+	deadline := time.After(studioCloseTimeout)
+
+	s.listenersMu.Lock()
+	s.closed.Store(true)
+	analyticsDone := s.analyticsDone
+	s.listenersMu.Unlock()
+
 	close(s.stop)
 	if s.autoDJCancel != nil {
 		s.autoDJCancel()
 	}
-	close(s.feed)
+
+	// A hijacked SOURCE connection only notices the stop once a read returns,
+	// so close it to unblock the read. Not under liveMu: closing a request body
+	// waits for an in-flight Read.
+	s.liveMu.RLock()
+	live := s.liveIngest
+	s.liveMu.RUnlock()
+	if live != nil {
+		go func() { _ = live.Close() }()
+	}
+
+	listenersGone := make(chan struct{})
+	go func() {
+		s.listenerWG.Wait()
+		close(listenersGone)
+	}()
+	select {
+	case <-listenersGone:
+	case <-deadline:
+		log.Printf("Studio %s: listeners still connected after %s; closing anyway", s.ID, studioCloseTimeout)
+	}
+	close(s.drained)
+
+	if analyticsDone != nil {
+		select {
+		case <-analyticsDone:
+		case <-deadline:
+			log.Printf("Studio %s: final analytics flush timed out", s.ID)
+		}
+	}
+	log.Printf("Studio %s: closed", s.ID)
 }
 
 // switcherLoop implements warm switching between AutoDJ and live streams.
@@ -478,7 +544,15 @@ func (s *Studio) Snapshot() StudioSnapshot {
 
 func (s *Studio) distribute() {
 	var evictees []*streamListener
-	for data := range s.feed {
+	for {
+		var data []byte
+		// feed is never closed (switcherLoop may still be sending), so stop
+		// ends the loop.
+		select {
+		case data = <-s.feed:
+		case <-s.stop:
+			return
+		}
 		now := time.Now()
 		// Write lock: the burst update and the fan-out must be atomic with
 		// respect to HandleListen, or a new listener could get a chunk twice.
@@ -520,6 +594,19 @@ func (s *Studio) rememberBurst(data []byte) {
 
 // HandleListen streams audio (live or AutoDJ) to a listener.
 func (s *Studio) HandleListen(w http.ResponseWriter, r *http.Request) {
+	// Join listenerWG under listenersMu, where Close sets closed: either Close
+	// waits for this listener or the listener is refused here.
+	s.listenersMu.Lock()
+	if s.closed.Load() {
+		s.listenersMu.Unlock()
+		netutil.ServerResponse(w, http.StatusServiceUnavailable, "Studio is shutting down", nil)
+		return
+	}
+	s.listenerWG.Add(1)
+	s.listenersMu.Unlock()
+	// Deferred first, so it runs last: after the session has been queued.
+	defer s.listenerWG.Done()
+
 	rc := http.NewResponseController(w)
 
 	// Every write gets its own deadline: a stalled client must not pin this

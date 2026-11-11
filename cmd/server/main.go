@@ -45,8 +45,13 @@ func startStreamingCredentialRefresh(s *stream.Studio, backendAPI, backendAPIKey
 	go func() {
 		t := time.NewTicker(streamingConfigRefreshInterval)
 		defer t.Stop()
-		for range t.C {
-			loadStreamingCredentials(s, backendAPI, backendAPIKey)
+		for {
+			select {
+			case <-t.C:
+				loadStreamingCredentials(s, backendAPI, backendAPIKey)
+			case <-s.Done(): // studio removed
+				return
+			}
 		}
 	}()
 }
@@ -116,9 +121,11 @@ func registerStudio(manager *stream.Manager, cfg *config.Config, slug string) {
 	startStreamingCredentialRefresh(s, cfg.BackendAPI, cfg.BackendAPIKey)
 }
 
-// syncStudios registers studios added in the backend after startup. Studios
-// removed or deactivated there keep running until restart: Studio has no
-// Close yet to stop its AutoDJ, analytics and listeners.
+// syncStudios keeps the registered studios in step with the backend's active
+// list: it registers new studios and closes the ones that were deactivated or
+// removed, disconnecting their listeners. A failed fetch changes nothing, and
+// an empty list removes nothing, so a backend hiccup never takes stations
+// off air.
 func syncStudios(manager *stream.Manager, cfg *config.Config) {
 	t := time.NewTicker(studioSyncInterval)
 	defer t.Stop()
@@ -128,8 +135,15 @@ func syncStudios(manager *stream.Manager, cfg *config.Config) {
 			log.Printf("studios: sync failed: %v", err)
 			continue
 		}
+		if len(slugs) == 0 {
+			log.Printf("studios: backend listed no active studios; keeping %v", manager.ListStudios())
+			continue
+		}
 		for _, slug := range slugs {
 			registerStudio(manager, cfg, slug)
+		}
+		if removed := manager.RemoveStudiosExcept(slugs); len(removed) > 0 {
+			log.Printf("studios: stopped %v (no longer active in the backend)", removed)
 		}
 	}
 }

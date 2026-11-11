@@ -2,6 +2,7 @@ package stream
 
 import (
 	"context"
+	"log"
 	"sort"
 	"sync"
 	"time"
@@ -111,17 +112,28 @@ func (b *bucketState) accrueListenerMinutes(delta time.Duration, active int) {
 	}
 }
 
-// StartAnalytics launches a goroutine that periodically flushes listener sessions and buckets to the backend
-func (s *Studio) StartAnalytics(ingestURL, apiKey string, flushEvery time.Duration) (stop chan struct{}) {
+// StartAnalytics launches a goroutine that periodically flushes listener
+// sessions and buckets to the backend. When the studio closes it sends one
+// last batch, with the sessions that just ended and the unfinished buckets.
+// Call it at most once per studio.
+func (s *Studio) StartAnalytics(ingestURL, apiKey string, flushEvery time.Duration) {
 	if ingestURL == "" || flushEvery <= 0 {
-		return nil
+		return
 	}
+	done := make(chan struct{})
+	s.listenersMu.Lock()
+	if s.closed.Load() {
+		s.listenersMu.Unlock()
+		return
+	}
+	s.analyticsDone = done
+	s.listenersMu.Unlock()
+
 	client := analytics.NewClient(ingestURL, apiKey)
-	stop = make(chan struct{})
 	bk := newBucketState()
 
 	go func() {
-		defer close(stop)
+		defer close(done)
 		tick := time.NewTicker(flushEvery)
 		defer tick.Stop()
 
@@ -140,13 +152,9 @@ func (s *Studio) StartAnalytics(ingestURL, apiKey string, flushEvery time.Durati
 		sent := map[string]sentState{}
 		flushN := 0
 
-		for {
-			select {
-			case <-tick.C:
-			case <-stop:
-				return
-			}
-
+		// flush sends one batch. The final one, when the studio closes, also
+		// sends unfinished buckets: no later flush will.
+		flush := func(final bool) {
 			flushN++
 			fullReconcile := flushN%listenerFullReconcileEvery == 1
 
@@ -175,9 +183,13 @@ func (s *Studio) StartAnalytics(ingestURL, apiKey string, flushEvery time.Durati
 				}
 			}
 
-			buckets := bk.drainReady(now.Add(-1 * time.Second))
+			cutoff := now.Add(-1 * time.Second)
+			if final {
+				cutoff = now.Add(2 * time.Hour) // past the end of every open bucket
+			}
+			buckets := bk.drainReady(cutoff)
 			if len(toSend) == 0 && len(buckets) == 0 && len(connectedIDs) == 0 {
-				continue
+				return
 			}
 
 			batch := analytics.IngestListenerBatch{
@@ -187,9 +199,18 @@ func (s *Studio) StartAnalytics(ingestURL, apiKey string, flushEvery time.Durati
 				ConnectedSessionIDs: connectedIDs,
 			}
 
+			ctx := context.Background()
+			if final {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, studioCloseTimeout)
+				defer cancel()
+			}
 			// send but don't block streaming on errors
-			if err := client.SendListenerBatch(context.Background(), batch); err != nil {
-				continue // keep sent and s.ended as-is so these sessions retry next flush
+			if err := client.SendListenerBatch(ctx, batch); err != nil {
+				if final {
+					log.Printf("Studio %s: final analytics flush failed: %v", s.ID, err)
+				}
+				return // keep sent and s.ended as-is so these sessions retry next flush
 			}
 
 			s.ended.ack(ended)
@@ -203,9 +224,17 @@ func (s *Studio) StartAnalytics(ingestURL, apiKey string, flushEvery time.Durati
 				}
 			}
 		}
-	}()
 
-	return stop
+		for {
+			select {
+			case <-tick.C:
+				flush(false)
+			case <-s.drained:
+				flush(true)
+				return
+			}
+		}
+	}()
 }
 
 // collectSessions turns the open connections into one DTO per listener session

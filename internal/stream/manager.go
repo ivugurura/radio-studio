@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -147,26 +148,73 @@ func (m *Manager) ListStudios() []string {
 	return out
 }
 
-// RemoveStudio stops and delete a studio
-// Any listeners are disconnected; in-flight HTTP responses end
+// RemoveStudio unregisters a studio and closes it: listeners and the live
+// source are disconnected and new requests for it get 404. It blocks until
+// the studio has closed (at most studioCloseTimeout).
 func (m *Manager) RemoveStudio(studioID string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	_, ok := m.studios[studioID]
+	s, ok := m.studios[studioID]
+	if ok {
+		delete(m.studios, studioID)
+	}
+	m.mu.Unlock()
 	if !ok {
 		return errors.New("Studio not found")
 	}
-	// s.Close() // Todo: Implement close in Studio for cleanup
-	delete(m.studios, studioID)
+	// Outside the lock: closing waits for listeners, and other studios'
+	// requests must not stall meanwhile.
+	s.Close()
 	log.Printf("Manager: removed studio %s", studioID)
 	return nil
 }
 
-// Shutdown closes all studios gracefully
+// RemoveStudiosExcept removes and closes every registered studio whose ID is
+// not in keep, and returns the removed IDs, sorted. Studios close in parallel.
+func (m *Manager) RemoveStudiosExcept(keep []string) []string {
+	wanted := make(map[string]bool, len(keep))
+	for _, id := range keep {
+		wanted[id] = true
+	}
+
+	m.mu.Lock()
+	var stale []*Studio
+	var removed []string
+	for id, s := range m.studios {
+		if !wanted[id] {
+			stale = append(stale, s)
+			removed = append(removed, id)
+			delete(m.studios, id)
+		}
+	}
+	m.mu.Unlock()
+
+	closeAll(stale)
+	for _, id := range removed {
+		log.Printf("Manager: removed studio %s", id)
+	}
+	sort.Strings(removed)
+	return removed
+}
+
+// Shutdown unregisters and closes every studio.
 func (m *Manager) Shutdown() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	log.Printf("Manager: shutting down (%d studios)", len(m.studios))
+	studios := make([]*Studio, 0, len(m.studios))
+	for _, s := range m.studios {
+		studios = append(studios, s)
+	}
+	clear(m.studios)
+	m.mu.Unlock()
+	log.Printf("Manager: shutting down (%d studios)", len(studios))
+	closeAll(studios)
+}
+
+func closeAll(studios []*Studio) {
+	var wg sync.WaitGroup
+	for _, s := range studios {
+		wg.Go(s.Close)
+	}
+	wg.Wait()
 }
 
 // Example graceful shutdown hook usage:
