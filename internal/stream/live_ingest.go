@@ -112,6 +112,11 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 	// Reserve the source before acknowledging the encoder so concurrent connects
 	// cannot both receive a successful response.
 	s.liveMu.Lock()
+	if s.closed.Load() {
+		s.liveMu.Unlock()
+		http.Error(w, "studio is shutting down", http.StatusServiceUnavailable)
+		return
+	}
 	if s.liveIngest != nil || s.liveActive.Load() {
 		s.liveMu.Unlock()
 		log.Printf("[live %s] rejected %s from %s: live source already active", s.ID, r.Method, r.RemoteAddr)
@@ -196,7 +201,13 @@ func (s *Studio) HandleLiveIngest(w http.ResponseWriter, r *http.Request) {
 
 	s.liveMu.Lock()
 	s.liveIngest = reader
+	// Close looks for a source to disconnect after setting closed; one set
+	// after that look must notice the shutdown itself.
+	closing := s.closed.Load()
 	s.liveMu.Unlock()
+	if closing {
+		return
+	}
 
 	connectedAt := time.Now()
 	log.Printf("[live %s] connected: method=%s remote=%s name=%q bitrate=%s samplerate=%s channels=%s", s.ID, r.Method, r.RemoteAddr, meta.Name, meta.Bitrate, meta.SampleRate, meta.Channels)
