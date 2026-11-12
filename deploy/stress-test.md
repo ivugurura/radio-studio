@@ -7,11 +7,11 @@ to the machine spec and whether the test went direct or through Nginx.
 
 Tools in this repo:
 
-| Tool | What it is | When |
-|---|---|---|
-| `cmd/loadtest` | stdlib Go streaming load generator, real-time body pacing | **reference** — capacity, eviction, underrun |
-| `deploy/loadtest.k6.js` | k6 script, same ramp shape | nicer percentiles / dashboards; no real-time pacing |
-| `ENABLE_PPROF=1` on the server | localhost `:6060` with `/debug/pprof/*` + `/debug/vars` | goroutine + memstats during a ramp |
+| Tool                           | What it is                                                | When                                                |
+| ------------------------------ | --------------------------------------------------------- | --------------------------------------------------- |
+| `cmd/loadtest`                 | stdlib Go streaming load generator, real-time body pacing | **reference** — capacity, eviction, underrun        |
+| `deploy/loadtest.k6.js`        | k6 script, same ramp shape                                | nicer percentiles / dashboards; no real-time pacing |
+| `ENABLE_PPROF=1` on the server | localhost `:6060` with `/debug/pprof/*` + `/debug/vars`   | goroutine + memstats during a ramp                  |
 
 ---
 
@@ -88,7 +88,7 @@ server under test.
 
 ```sh
 # terminal 1 — server, no backend needed
-LISTEN_ADDR=7080 ENABLE_PPROF=1 go run cmd/server/main.go
+LISTEN_ADDR=7080 ENABLE_PPROF=1 go run ./cmd/server
 
 # terminal 2 — 10 listeners for 30 s
 go run cmd/loadtest/main.go \
@@ -192,10 +192,10 @@ A widening gap between the generator's `intended` and the server's
 
 ## Recording the result
 
-| Date | Box (vCPU / RAM / NIC) | Path | Drain | Max healthy listeners | First failure signal | Egress at peak |
-|---|---|---|---|---|---|---|
-|  |  | direct :7081 | realtime |  |  |  |
-|  |  | via nginx | realtime |  |  |  |
+| Date | Box (vCPU / RAM / NIC) | Path         | Drain    | Max healthy listeners | First failure signal | Egress at peak |
+| ---- | ---------------------- | ------------ | -------- | --------------------- | -------------------- | -------------- |
+|      |                        | direct :7081 | realtime |                       |                      |                |
+|      |                        | via nginx    | realtime |                       |                      |                |
 
 Once staging gives a stable number, add a one-line **Expected concurrency** note
 to `deploy/command.md` so ops has a reference.
@@ -204,19 +204,19 @@ to `deploy/command.md` so ops has a reference.
 
 ## `cmd/loadtest` flags
 
-| Flag | Default | Meaning |
-|---|---|---|
-| `-url` | — | target `/listen` URL (required) |
-| `-start` | 100 | listeners opened immediately |
-| `-step` / `-step-interval` | 100 / 30s | listeners added each interval (`-step 0` = no ramp) |
-| `-max` | 5000 | peak concurrent listeners |
-| `-hold` | 60s | time held at `-max` before teardown |
-| `-rate` | 16000 | per-conn drain rate, bytes/s (128 kbps) |
-| `-drain` | realtime | `realtime` = pace to `-rate`; `fast` = read flat out (pure conn/throughput capacity) |
-| `-spawn-delay` | 2ms | gap between dials while spawning |
-| `-stall-pct` | 0 | % of listeners that connect and never read (slow-listener cleanup test) |
-| `-out` | — | CSV of progress rows |
-| `-insecure` | false | skip TLS verification |
+| Flag                       | Default   | Meaning                                                                              |
+| -------------------------- | --------- | ------------------------------------------------------------------------------------ |
+| `-url`                     | —         | target `/listen` URL (required)                                                      |
+| `-start`                   | 100       | listeners opened immediately                                                         |
+| `-step` / `-step-interval` | 100 / 30s | listeners added each interval (`-step 0` = no ramp)                                  |
+| `-max`                     | 5000      | peak concurrent listeners                                                            |
+| `-hold`                    | 60s       | time held at `-max` before teardown                                                  |
+| `-rate`                    | 16000     | per-conn drain rate, bytes/s (128 kbps)                                              |
+| `-drain`                   | realtime  | `realtime` = pace to `-rate`; `fast` = read flat out (pure conn/throughput capacity) |
+| `-spawn-delay`             | 2ms       | gap between dials while spawning                                                     |
+| `-stall-pct`               | 0         | % of listeners that connect and never read (slow-listener cleanup test)              |
+| `-out`                     | —         | CSV of progress rows                                                                 |
+| `-insecure`                | false     | skip TLS verification                                                                |
 
 CSV columns: `elapsed_s, intended, connected, connect_errs, early_closed,
 close_ended, close_reset, close_other, agg_mbps, ttfb_p50_ms, ttfb_p95_ms,

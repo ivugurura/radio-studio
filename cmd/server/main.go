@@ -2,12 +2,10 @@ package main
 
 import (
 	"context"
-	"crypto/subtle"
 	"errors"
 	"log"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 
 	// Registered on http.DefaultServeMux by their init funcs (expvar ->
@@ -121,33 +119,6 @@ func registerStudio(manager *stream.Manager, cfg *config.Config, slug string) {
 	startStreamingCredentialRefresh(s, cfg.BackendAPI, cfg.BackendAPIKey)
 }
 
-// syncStudios keeps the registered studios in step with the backend's active
-// list: it registers new studios and closes the ones that were deactivated or
-// removed, disconnecting their listeners. A failed fetch changes nothing, and
-// an empty list removes nothing, so a backend hiccup never takes stations
-// off air.
-func syncStudios(manager *stream.Manager, cfg *config.Config) {
-	t := time.NewTicker(studioSyncInterval)
-	defer t.Stop()
-	for range t.C {
-		slugs, err := fetchStudioSlugs(cfg)
-		if err != nil {
-			log.Printf("studios: sync failed: %v", err)
-			continue
-		}
-		if len(slugs) == 0 {
-			log.Printf("studios: backend listed no active studios; keeping %v", manager.ListStudios())
-			continue
-		}
-		for _, slug := range slugs {
-			registerStudio(manager, cfg, slug)
-		}
-		if removed := manager.RemoveStudiosExcept(slugs); len(removed) > 0 {
-			log.Printf("studios: stopped %v (no longer active in the backend)", removed)
-		}
-	}
-}
-
 // backendOnlyActions are control actions only the backend may trigger; the
 // admin UI goes through the backend, which authorizes the user first.
 var backendOnlyActions = map[string]bool{"skip": true}
@@ -157,8 +128,7 @@ func requireBackendToken(apiKey string) stream.RequestValidator {
 		if !backendOnlyActions[action] {
 			return nil
 		}
-		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if !ok || apiKey == "" || subtle.ConstantTimeCompare([]byte(token), []byte(apiKey)) != 1 {
+		if !hasBackendToken(r, apiKey) {
 			return errors.New("Not authorized")
 		}
 		return nil
@@ -204,12 +174,20 @@ func main() {
 	for _, slug := range slugs {
 		registerStudio(manager, cfg, slug)
 	}
-	if cfg.BackendAPI != "" {
-		go syncStudios(manager, cfg)
-	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/studios/", netutil.WithCORS(manager.RouteStudioRequest, cfg.AllowedOrigins))
+
+	// Studios are re-checked every studioSyncInterval, and at once when the
+	// backend asks after a studio is created, activated or deactivated. Keep
+	// /internal/ off the public nginx locations: only the backend calls it.
+	stopSync := make(chan struct{})
+	defer close(stopSync)
+	if cfg.BackendAPI != "" {
+		syncer := newStudioSyncer(studioSyncInterval, func() { reconcileStudios(manager, cfg) })
+		go syncer.run(stopSync)
+		mux.HandleFunc("/internal/sync", syncer.handleSyncRequest(cfg.BackendAPIKey))
+	}
 
 	stopMon := make(chan struct{})
 	// manager.StartMonitor(30*time.Second, stopMon)
